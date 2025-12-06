@@ -3,11 +3,7 @@ import { AgentManager } from "../managers/agent.manager.js";
 import { Innertube } from 'youtubei.js';
 import { normalizeYouTubeUrl } from "./utils.js";
 
-export type VideoQuality = '1080p' | '720p' | '480p' | '360p' | 'highest';
-
 const agentManager = AgentManager.getInstance();
-
-
 
 const userAgents = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -16,7 +12,6 @@ const userAgents = [
   'Mozilla/5.0 (iPhone; CPU iPhone OS 17_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1',
   'Mozilla/5.0 (Linux; Android 12; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36'
 ];
-
 
 const cookieCollections = [
   {
@@ -65,11 +60,9 @@ const youtubeConfigs = [
   { client_type: 'ANDROID', retriever: 'ANDROID', agent_index: 4, cookie_index: 1 }
 ];
 
-
 const isValidYouTubeID = (id: string): boolean => {
   return /^[a-zA-Z0-9_-]{11}$/.test(id);
 };
-
 
 const attemptToFixYouTubeUrl = (url: string): string => {
   try {

@@ -1,6 +1,7 @@
 import { normalizeYouTubeUrl, sanitizeFilename, sendToAllClients } from "../lib/utils.js";
 import ytdl from "@distube/ytdl-core";
-import { downloadVideoStream, VideoQuality, getVideoInfo } from "../lib/video.js";
+import ytpl from "@distube/ytpl";
+import { downloadVideoStream, getVideoInfo } from "../lib/video.js";
 import { spawn } from 'child_process';
 import ffmpegPath from 'ffmpeg-static';
 import path from "path";
@@ -9,17 +10,6 @@ import { PATH_SAVE } from "../config.js";
 import archiver from "archiver";
 import pLimit from "p-limit";
 import { PassThrough } from "stream";
-import { AgentManager } from "../managers/agent.manager.js";
-
-export type formats = "mp4" | "webm";
-
-const agentManager = AgentManager.getInstance();
-
-const cookieJar = [
-  { name: 'CONSENT', value: 'YES+cb.20210328-17-p0.en+FX+030', domain: '.youtube.com', path: '/' },
-  { name: 'VISITOR_INFO1_LIVE', value: 'y4VIyEZEHSw', domain: '.youtube.com', path: '/' },
-  { name: 'PREF', value: 'f4=4000000&f6=40000000&tz=America.Mexico_City', domain: '.youtube.com', path: '/' }
-];
 
 const browserHeaders = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -44,10 +34,25 @@ export const infoVideo = async (req: any, res: any) => {
 
   console.log(`Petición recibida - URLs: ${urls}`);
 
+  let expandedUrls: string[] = [];
+  try {
+    for (const url of urls) {
+      try {
+        const playlistId = await ytpl.getPlaylistID(url);
+        const playlist = await ytpl(playlistId, { limit: Infinity });
+        expandedUrls.push(...playlist.items.map(item => item.url));
+      } catch (error) {
+        expandedUrls.push(url);
+      }
+    }
+  } catch (error: any) {
+    return res.status(500).json({ message: "Error al procesar las URLs", error: error.message });
+  }
+
   const format = req.body.format || "mp4";
   const infoUrls: { url: string; title: string; description: string | null; thumbnail: { url: string, width: number, height: number }; qualities: string[] }[] = [];
   
-  const response = await Promise.all(urls.map(async url => {
+  const response = await Promise.all(expandedUrls.map(async url => {
     const urlNoNormalize = normalizeYouTubeUrl(url);
 
     try {
@@ -70,7 +75,7 @@ export const downloadVideo = async (req: any, res: any) => {
     return res.status(400).json({ message: "Falta arreglo de URLs" });
   }
 
-  const format: formats = req.body.format ?? "mp4";
+  const format: VideoFormats = req.body.format ?? "mp4";
   const quality: VideoQuality = req.body.quality ?? 'highest';
   const converted: { url: string, filename: string }[] = []
 
@@ -147,7 +152,7 @@ export const convertToVideo = async (req: any, res: any) => {
     return res.status(400).json({ message: "Falta arreglo de URLs" });
   }
 
-  const format: formats = req.body.format ?? "mp4";
+  const format: VideoFormats = req.body.format ?? "mp4";
   const quality: string = req.body.quality ?? 'highest';
   console.log(`Petición recibida - Formato: ${format}, Calidad: ${quality}, URLs: ${urls.length}, body: ${JSON.stringify(req.body)}`);
 
