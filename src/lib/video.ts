@@ -2,6 +2,9 @@ import ytdl from "@distube/ytdl-core";
 import { AgentManager } from "../managers/agent.manager.js";
 import { Innertube } from 'youtubei.js';
 import { normalizeYouTubeUrl } from "./utils.js";
+import { spawn } from "child_process";
+import fs from "fs";
+import { COOKIES_PATH } from "../config.js";
 
 const agentManager = AgentManager.getInstance();
 
@@ -89,7 +92,6 @@ const attemptToFixYouTubeUrl = (url: string): string => {
   }
 };
 
-
 const extractVideoID = (url: string): string => {
   try {
     const normalizedUrl = normalizeYouTubeUrl(url) || url;
@@ -157,7 +159,6 @@ export const getVideoInfo = async (url: string): Promise<any> => {
         
         if (youtube.session && (youtube.session as any).cookies) {
           try {
-
             Object.entries(cookies).forEach(([key, value]) => {
               (youtube.session as any).cookies.set(key, value);
             });
@@ -168,11 +169,9 @@ export const getVideoInfo = async (url: string): Promise<any> => {
         }
 
         let video;
-        
         if (config.retriever === 'WEB') {
           video = await youtube.getBasicInfo(videoId);
         } else {
-
           video = await youtube.getInfo(videoId);
         }
         
@@ -221,20 +220,14 @@ export const getVideoInfo = async (url: string): Promise<any> => {
     
     try {
       console.log(`Intentando método fallback con ytdl-core para URL: ${url}`);
-
       let ytdlError;
       let videoDetails, formats;
       
       for (let i = 0; i < userAgents.length; i++) {
         try {
           const headers = getRotatingHeaders(i);
-          console.log(`Intento ytdl-core ${i+1}/${userAgents.length} con User-Agent: ${headers['User-Agent'].substring(0, 20)}...`);
-
           const cookies = getRotatingCookies(i % cookieCollections.length);
-          const cookieString = Object.entries(cookies)
-            .map(([key, value]) => `${key}=${value}`)
-            .join('; ');
-          
+          const cookieString = Object.entries(cookies).map(([key, value]) => `${key}=${value}`).join('; ');
           headers['Cookie'] = cookieString;
 
           const result = await ytdl.getInfo(url, { 
@@ -244,12 +237,9 @@ export const getVideoInfo = async (url: string): Promise<any> => {
           
           videoDetails = result.videoDetails;
           formats = result.formats;
-          
-          console.log(`Éxito con ytdl-core en el intento ${i+1}`);
           break;
         } catch (err: unknown) {
           ytdlError = err;
-          console.error(`Intento ${i+1} fallido con ytdl-core: ${err instanceof Error ? err.message : 'Error desconocido'}`);
         }
       }
 
@@ -274,42 +264,52 @@ export const getVideoInfo = async (url: string): Promise<any> => {
         source: 'ytdl-fallback' 
       };
     } catch (ytdlError: any) {
-      console.error(`También falló el fallback con ytdl-core: ${ytdlError.message || 'Error desconocido'}`);
-      throw new Error(`No se pudo obtener la información del video: ${error.message || 'Error desconocido'}`);
+      throw new Error(`No se pudo obtener la información del video: ${error.message}`);
     }
   }
 };
 
 export const downloadVideoStream = async (url: string, quality: VideoQuality = 'highest') => {
   try {
-    const info = await ytdl.getInfo(url, { agent: agentManager.getAgent() });
-
-    const videoFormat = ytdl.chooseFormat(info.formats, {
-      quality: quality === 'highest' ? 'highestvideo' : undefined,
-      filter: (format) => {
-        const qualityMatch = quality === 'highest' ? true : format.qualityLabel?.startsWith(quality);
-        return !!(format.container === "mp4" && !format.hasAudio && qualityMatch);
-      },
-    });
-
-    if (!videoFormat) {
-      throw new Error(`No se encontró un formato de video MP4 para la calidad '${quality}'.`);
+    const ytDlpCmd = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp';
+    
+    let formatSelector = 'bestvideo+bestaudio/best';
+    if (quality !== 'highest') {
+        const height = quality.replace(/[^0-9]/g, '');
+        if (height) {
+            formatSelector = `bestvideo[height<=${height}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${height}]/best`;
+        }
+    } else {
+        formatSelector = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best';
     }
 
-    const audioFormat = ytdl.chooseFormat(info.formats, {
-      quality: "highestaudio",
-      filter: "audioonly",
-    });
+    const args = [
+        '-f', formatSelector,
+        '--no-playlist',
+        '--merge-output-format', 'mp4',
+        '-o', '-',
+        url
+    ];
 
-    if (!audioFormat) {
-      throw new Error("No se encontró un formato de audio adecuado.");
+    if (fs.existsSync(COOKIES_PATH)) {
+        args.push('--cookies', COOKIES_PATH);
     }
 
-    const videoStream = ytdl(url, { format: videoFormat, agent: agentManager.getAgent() });
-    const audioStream = ytdl(url, { format: audioFormat, agent: agentManager.getAgent() });
+    const ytDlpProcess = spawn(ytDlpCmd, args);
 
-    return { info, videoStream, audioStream };
+    const robustInfo = await getVideoInfo(url).catch(() => null);
+    const info = {
+        videoDetails: {
+            title: robustInfo?.title || 'Video'
+        }
+    };
+
+    return { 
+        info, 
+        stream: ytDlpProcess.stdout as NodeJS.ReadableStream,
+        process: ytDlpProcess
+    };
   } catch (error: any) {
-    throw new Error(`Error al descargar el video: ${error.message}`);
+    throw new Error(`Error al descargar el video con yt-dlp: ${error.message}`);
   }
 };

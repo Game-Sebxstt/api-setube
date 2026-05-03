@@ -1,29 +1,27 @@
-import ytdl from "@distube/ytdl-core";
 import retry from "async-retry";
 import { spawn } from "child_process";
+import fs from "fs";
+import { COOKIES_PATH } from "../config.js";
+import { getVideoInfo } from "./video.js";
 
 export async function downloadAudioStream(url: string): Promise<{
-    info: ytdl.videoInfo;
+    info: any;
     stream: NodeJS.ReadableStream
 }> {
     return await retry(async (bail) => {
         try {
-            const info = await ytdl.getInfo(url).catch(() => ({
+            const robustInfo = await getVideoInfo(url).catch(() => null);
+            const info = {
                 videoDetails: {
-                    videoId: url.split('v=')[1]?.split('&')[0] || '',
-                    title: 'Audio',
-                    lengthSeconds: '0',
-                    author: { name: 'Unknown' }
-                },
-                formats: [] // Ensure formats array exists for type safety, though downloadFromInfo checks it
-            } as unknown as ytdl.videoInfo));
+                    title: robustInfo?.title || 'Audio',
+                    videoId: url.split('v=')[1]?.split('&')[0] || ''
+                }
+            };
 
-            console.log(`Descargando: ${info.videoDetails.title}`);
+            console.log(`Descargando (yt-dlp): ${info.videoDetails.title}`);
 
-            // Reverting to yt-dlp as primary due to stability issues with ytdl-core (incomplete downloads)
             const ytDlpCmd = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp';
-
-            const ytDlpProcess = spawn(ytDlpCmd, [
+            const args = [
                 '-f', 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio',
                 '--no-playlist',
                 '--no-warnings',
@@ -33,20 +31,27 @@ export async function downloadAudioStream(url: string): Promise<{
                 '--concurrent-fragments', '8',
                 '-o', '-',
                 url
-            ], {
-                shell: true
+            ];
+
+            if (fs.existsSync(COOKIES_PATH)) {
+                args.push('--cookies', COOKIES_PATH);
+            }
+
+            const ytDlpProcess = spawn(ytDlpCmd, args, {
+                shell: false // Prefer shell: false in Docker
             });
 
             const stream = ytDlpProcess.stdout as NodeJS.ReadableStream;
 
             ytDlpProcess.stderr.on('data', (data) => {
                 const msg = data.toString();
-                if (msg.includes('ERROR')) console.error('yt-dlp:', msg);
+                if (msg.includes('ERROR')) console.error('yt-dlp ERROR:', msg);
             });
 
             ytDlpProcess.on('error', (err: any) => {
+                console.error('Error al ejecutar yt-dlp:', err);
                 if (err.code === 'ENOENT') {
-                    console.error('yt-dlp no encontrado. Instala con: winget install yt-dlp');
+                    console.error('yt-dlp no encontrado.');
                 }
             });
 
@@ -54,7 +59,7 @@ export async function downloadAudioStream(url: string): Promise<{
 
         } catch (error: any) {
             if (error.statusCode === 403 || error.message.includes('403')) {
-                bail(new Error('Error 403'));
+                bail(new Error('Error 403 en YouTube'));
                 return { info: null as any, stream: null as any };
             }
             throw error;

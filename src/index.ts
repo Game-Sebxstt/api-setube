@@ -1,8 +1,6 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import ffmpeg from "fluent-ffmpeg";
-import ffmpegStatic from "ffmpeg-static";
 import { config } from "dotenv";
 import fs from "fs";
 import { ClientsManager } from "./managers/clients.manager.js"
@@ -15,7 +13,6 @@ import rateLimit from "express-rate-limit";
 import hpp from "hpp";
 
 config();
-ffmpeg.setFfmpegPath(ffmpegStatic as unknown as string);
 
 const PORT = process.env.PORT || 4001;
 const ORIGINS = process.env.ORIGIN?.split(",") || [];
@@ -25,16 +22,16 @@ if (!fs.existsSync(PATH_SAVE)) fs.mkdirSync(PATH_SAVE, { recursive: true });
 const app = express();
 
 const limiter = rateLimit({
-	windowMs: 15 * 60 * 1000, // 15 minutes
-	max: 100, // Limit each IP to 100 requests per windowMs
-	standardHeaders: true,
-	legacyHeaders: false,
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 100, // Limit each IP to 100 requests per windowMs
+    standardHeaders: true,
+    legacyHeaders: false,
 });
 
-const corsOptions = { 
-    origin: ORIGINS, 
-    credentials: true, 
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"] 
+const corsOptions = {
+    origin: ORIGINS,
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
 };
 
 app.use(helmet());
@@ -58,6 +55,6 @@ app.use("/audio", audioRouter);
 app.use("/video", videoRouter);
 
 app.listen(PORT, () => {
-  console.log(`Servidor corriendo en http://localhost:${PORT}`);
-  console.log(`MP3s guardados en ${PATH_SAVE}`);
+    console.log(`Servidor corriendo en http://localhost:${PORT}`);
+    console.log(`MP3s guardados en ${PATH_SAVE}`);
 });

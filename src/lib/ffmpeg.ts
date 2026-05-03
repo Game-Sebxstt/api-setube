@@ -40,13 +40,13 @@ export function convertAudio(stream: any, format: AudioFormats, output: outputOp
       .format(format);
 
     if (format === "mp3") {
-      // SPEED OPTIMIZATION: CBR 128k + Stereo
-      // -b:a 128k is faster than VBR (-q:a)
-      // -ac 2 ensures stereo without complex mixing logic
       command.outputOptions([
+        "-codec:a", "libmp3lame",
         "-b:a", "128k",
         "-ac", "2",
-        "-compression_level", "0" // Fastest compression
+        "-compression_level", "0",
+        "-preset", "ultrafast",
+        "-threads", "0"
       ]);
     }
 
