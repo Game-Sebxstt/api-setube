@@ -1,0 +1,143 @@
+{
+  "id": "jNQXAC9IVRw",
+  "title": "Me at the zoo",
+  "channel": "jawed",
+  "uploader": "jawed",
+  "duration": 19,
+  "live_status": "not_live",
+  "age_limit": 0,
+  "description": "Descripción de prueba redactada a mano.",
+  "tags": ["zoo"],
+  "chapters": null,
+  "heatmap": [{ "start_time": 0, "end_time": 1, "value": 1 }],
+  "thumbnails": [{ "url": "https://i.ytimg.com/vi/jNQXAC9IVRw/default.jpg" }],
+  "automatic_captions": { "en": [] },
+  "subtitles": {},
+  "comments": [],
+  "webpage_url": "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+  "original_url": "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+  "requested_formats": [{ "format_id": "140" }],
+  "requested_subtitles": null,
+  "_format_sort_fields": ["res"],
+  "cookies": "FAKE_TOP=no-es-real; Domain=.youtube.com",
+  "http_headers": { "User-Agent": "Mozilla/5.0", "Cookie": "FAKE_TOP_HDR=no-es-real" },
+  "formats": [
+    {
+      "format_id": "sb0",
+      "format_note": "storyboard",
+      "ext": "mhtml",
+      "protocol": "mhtml",
+      "vcodec": "none",
+      "acodec": "none",
+      "url": "https://i.ytimg.com/sb/jNQXAC9IVRw/storyboard3_L0/default.jpg"
+    },
+    {
+      "format_id": "139",
+      "ext": "m4a",
+      "protocol": "https",
+      "vcodec": "none",
+      "acodec": "mp4a.40.5",
+      "abr": 48.8,
+      "filesize": 113000,
+      "url": "https://rr1---sn-fake.googlevideo.com/videoplayback?expire=1999999999&itag=139",
+      "cookies": "FAKE_FMT=no-es-real",
+      "http_headers": { "User-Agent": "Mozilla/5.0", "Accept": "*/*", "cookie": "FAKE_FMT_HDR=no-es-real" }
+    },
+    {
+      "format_id": "140",
+      "ext": "m4a",
+      "protocol": "https",
+      "vcodec": "none",
+      "acodec": "mp4a.40.2",
+      "abr": 129.5,
+      "filesize": 300000,
+      "url": "https://rr1---sn-fake.googlevideo.com/videoplayback?expire=1999999999&itag=140",
+      "http_headers": { "User-Agent": "Mozilla/5.0", "Cookie": "FAKE=no-es-real" }
+    },
+    {
+      "format_id": "251",
+      "ext": "webm",
+      "protocol": "https",
+      "vcodec": "none",
+      "acodec": "opus",
+      "abr": 135.2,
+      "filesize_approx": 310000,
+      "url": "https://rr1---sn-fake.googlevideo.com/videoplayback?expire=1999999999&itag=251"
+    },
+    {
+      "format_id": "233",
+      "ext": "mp4",
+      "protocol": "m3u8_native",
+      "vcodec": "none",
+      "acodec": "mp4a.40.5",
+      "url": "https://manifest.googlevideo.com/api/manifest/hls_playlist/expire/1999999999/itag/233/index.m3u8"
+    },
+    {
+      "format_id": "160",
+      "ext": "mp4",
+      "protocol": "https",
+      "vcodec": "avc1.4d400c",
+      "acodec": "none",
+      "height": 144,
+      "fps": 15,
+      "tbr": 60,
+      "filesize": 120000,
+      "url": "https://rr1---sn-fake.googlevideo.com/videoplayback?expire=1999999999&itag=160",
+      "fragments": [{ "url": "https://example.invalid/frag1", "duration": 5 }]
+    },
+    {
+      "format_id": "133",
+      "ext": "mp4",
+      "protocol": "https",
+      "vcodec": "avc1.4d4015",
+      "acodec": "none",
+      "height": 240,
+      "fps": 30,
+      "tbr": 140,
+      "filesize": 250000,
+      "url": "https://rr1---sn-fake.googlevideo.com/videoplayback?expire=1999999999&itag=133"
+    },
+    {
+      "format_id": "134",
+      "ext": "mp4",
+      "protocol": "https",
+      "vcodec": "avc1.4d401e",
+      "acodec": "none",
+      "height": 360,
+      "fps": 30,
+      "tbr": 230,
+      "filesize": 500000,
+      "url": "https://rr1---sn-fake.googlevideo.com/videoplayback?expire=1999999999&itag=134"
+    },
+    {
+      "format_id": "134-dash",
+      "ext": "mp4",
+      "protocol": "http_dash_segments",
+      "vcodec": "avc1.4d401e",
+      "acodec": "none",
+      "height": 360,
+      "tbr": 900,
+      "url": "https://example.invalid/dash.mpd"
+    },
+    {
+      "format_id": "243",
+      "ext": "webm",
+      "protocol": "https",
+      "vcodec": "vp9",
+      "acodec": "none",
+      "height": 360,
+      "tbr": 200,
+      "url": "https://rr1---sn-fake.googlevideo.com/videoplayback?expire=1999999999&itag=243"
+    },
+    {
+      "format_id": "18",
+      "ext": "mp4",
+      "protocol": "https",
+      "vcodec": "avc1.42001E",
+      "acodec": "mp4a.40.2",
+      "height": 240,
+      "tbr": 300,
+      "url": "https://rr1---sn-fake.googlevideo.com/videoplayback?expire=1999999999&itag=18"
+    }
+  ]
+}

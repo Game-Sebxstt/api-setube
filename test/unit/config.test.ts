@@ -1,0 +1,202 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { Writable } from 'node:stream';
+import Fastify from 'fastify';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { ConfigError, loadConfig } from '../../src/config/env.js';
+import { loggerOptions } from '../../src/lib/logger.js';
+import { cookies } from '../../src/lib/media/cookies.js';
+
+const HEX = 'a'.repeat(64);
+const COOKIE_VALUE = 'valor-secreto-de-prueba-123';
+const COOKIES_JSON = JSON.stringify([
+  { domain: '.youtube.com', path: '/', secure: true, httpOnly: true, expirationDate: 2000000000, name: 'PRUEBA', value: COOKIE_VALUE },
+]);
+
+const base = (extra: Record<string, string> = {}): NodeJS.ProcessEnv => ({
+  NODE_ENV: 'development',
+  REDIS_URL: `redis://:${HEX}@redis:6379/0`,
+  ...extra,
+});
+
+function memLogger() {
+  const calls: { obj: object; msg: string }[] = [];
+  return { calls, warn: (obj: object, msg: string) => calls.push({ obj, msg }) };
+}
+
+function memStream() {
+  const lines: string[] = [];
+  const stream = new Writable({
+    write(chunk: Buffer, _enc, cb) {
+      lines.push(chunk.toString('utf8'));
+      cb();
+    },
+  });
+  return { lines, stream };
+}
+
+function keysOf(fn: () => unknown): string[] {
+  try {
+    fn();
+  } catch (e) {
+    expect(e).toBeInstanceOf(ConfigError);
+    return (e as ConfigError).keys;
+  }
+  throw new Error('se esperaba ConfigError');
+}
+
+beforeEach(() => cookies.reset());
+afterEach(() => {
+  cookies.reset();
+  delete process.env.YOUTUBE_COOKIES_JSON;
+});
+
+describe('loadConfig', () => {
+  it('aplica defaults', () => {
+    const c = loadConfig(base());
+    expect(c.port).toBe(4000);
+    expect(c.convertConcurrency).toBe(4);
+    expect(c.corsOrigins).toEqual(['http://localhost:3000']);
+    expect(c.trustProxy).toBe(false);
+    expect(c.cookiesConfigured).toBe(false);
+    expect(c.ytdlpArgsPrefix).toEqual([]);
+  });
+
+  it('convierte tipos y TRUST_PROXY', () => {
+    const c = loadConfig(base({ PORT: '4100', TRUST_PROXY: '1', AUDIO_HLS_FALLBACK: 'false', CORS_ORIGINS: 'https://a.com, https://b.com' }));
+    expect(c.port).toBe(4100);
+    expect(c.trustProxy).toBe(1);
+    expect(c.audioHlsFallback).toBe(false);
+    expect(c.corsOrigins).toEqual(['https://a.com', 'https://b.com']);
+  });
+
+  it('env inválido → lista de claves sin valores', () => {
+    try {
+      loadConfig(base({ PORT: 'abc-valor', LOG_LEVEL: 'ruidoso' }));
+      throw new Error('no falló');
+    } catch (e) {
+      expect(e).toBeInstanceOf(ConfigError);
+      const err = e as ConfigError;
+      expect(err.keys).toEqual(expect.arrayContaining(['PORT', 'LOG_LEVEL']));
+      expect(err.message).not.toContain('abc-valor');
+      expect(err.message).not.toContain('ruidoso');
+      expect(JSON.stringify(err.keys)).not.toContain('abc-valor');
+    }
+  });
+
+  it.each([
+    ['SLOT_LEASE_MS', { SLOT_LEASE_MS: '20000' }],
+    ['WAIT_LEASE_MS', { WAIT_LEASE_MS: '4000' }],
+    ['MAX_ITEMS_PER_JOB', { MAX_ITEMS_PER_JOB: '101', MAX_PLAYLIST_ITEMS: '50' }],
+    ['ZIP_PARALLEL_AUDIO', { ZIP_PARALLEL_AUDIO: '0' }],
+    ['ZIP_PARALLEL_AUDIO', { ZIP_PARALLEL_AUDIO: '5', CONVERT_CONCURRENCY: '4' }],
+    ['YTDLP_ARGS_PREFIX', { YTDLP_ARGS_PREFIX: 'no-json' }],
+    ['FFMPEG_ARGS_PREFIX', { FFMPEG_ARGS_PREFIX: '[1,2]' }],
+    ['MAX_PLAYLIST_ITEMS', { MAX_PLAYLIST_ITEMS: '60', MAX_ITEMS_PER_JOB: '50' }],
+    ['CONVERT_CONCURRENCY', { CONVERT_CONCURRENCY: '0' }],
+  ])('validación cruzada: %s', (key, extra) => {
+    expect(keysOf(() => loadConfig(base(extra)))).toContain(key);
+  });
+
+  it('acepta *_ARGS_PREFIX como array JSON de strings', () => {
+    const c = loadConfig(base({ YTDLP_ARGS_PREFIX: '["test/fixtures/fake-ytdlp.mjs"]' }));
+    expect(c.ytdlpArgsPrefix).toEqual(['test/fixtures/fake-ytdlp.mjs']);
+  });
+
+  it('REDIS_PASSWORD no hex en la URL → fatal', () => {
+    expect(keysOf(() => loadConfig(base({ REDIS_URL: 'redis://:no-hex-pass@redis:6379/0' })))).toEqual(['REDIS_URL']);
+    expect(keysOf(() => loadConfig(base({ REDIS_URL: 'redis://:abcd@redis:6379/0' })))).toEqual(['REDIS_URL']);
+    expect(loadConfig(base({ REDIS_URL: 'redis://redis:6379/0' })).redisUrl).toBe('redis://redis:6379/0');
+  });
+
+  it('IP_HASH_SALT obligatorio en producción', () => {
+    expect(keysOf(() => loadConfig(base({ NODE_ENV: 'production' })))).toContain('IP_HASH_SALT');
+    expect(loadConfig(base({ NODE_ENV: 'production', IP_HASH_SALT: HEX })).isProd).toBe(true);
+  });
+
+  it('YOUTUBE_COOKIES_JSON: se borra de process.env tras cargarla', () => {
+    process.env.YOUTUBE_COOKIES_JSON = COOKIES_JSON;
+    const env = { ...base(), YOUTUBE_COOKIES_JSON: COOKIES_JSON };
+    const c = loadConfig(env);
+    expect(c.cookiesConfigured).toBe(true);
+    expect(process.env.YOUTUBE_COOKIES_JSON).toBeUndefined();
+    expect(env.YOUTUBE_COOKIES_JSON).toBeUndefined();
+    expect(JSON.stringify(c)).not.toContain(COOKIE_VALUE);
+    expect(JSON.stringify(c)).not.toContain('PRUEBA');
+  });
+
+  it('producción + YOUTUBE_COOKIES_JSON → exactamente un warn cookies_via_env sin el valor', () => {
+    const log = memLogger();
+    loadConfig(base({ NODE_ENV: 'production', IP_HASH_SALT: HEX, YOUTUBE_COOKIES_JSON: COOKIES_JSON }), log);
+    const warns = log.calls.filter((c) => c.msg === 'cookies_via_env');
+    expect(warns).toHaveLength(1);
+    expect(log.calls).toHaveLength(1);
+    expect(JSON.stringify(log.calls)).not.toContain(COOKIE_VALUE);
+  });
+
+  it('desarrollo + YOUTUBE_COOKIES_JSON → sin warn', () => {
+    const log = memLogger();
+    loadConfig(base({ YOUTUBE_COOKIES_JSON: COOKIES_JSON }), log);
+    expect(log.calls).toHaveLength(0);
+  });
+
+  it('YOUTUBE_COOKIES_JSON inválido → fatal con la clave', () => {
+    expect(keysOf(() => loadConfig(base({ YOUTUBE_COOKIES_JSON: '{no json' })))).toEqual(['YOUTUBE_COOKIES_JSON']);
+  });
+
+  it('YTDLP_COOKIES_FILE inexistente → fatal', () => {
+    const missing = path.join(os.tmpdir(), `setube-no-existe-${Date.now()}.txt`);
+    try {
+      loadConfig(base({ YTDLP_COOKIES_FILE: missing }));
+      throw new Error('no falló');
+    } catch (e) {
+      expect(e).toBeInstanceOf(ConfigError);
+      expect((e as ConfigError).keys).toEqual(['YTDLP_COOKIES_FILE']);
+      expect((e as ConfigError).details).toMatchObject({ path: missing, code: 'ENOENT' });
+    }
+  });
+
+  it('YTDLP_COOKIES_FILE legible → configurado; gana sobre YOUTUBE_COOKIES_JSON', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'setube-ck-'));
+    const file = path.join(dir, 'ck.txt');
+    fs.writeFileSync(file, '# Netscape HTTP Cookie File\n');
+    try {
+      const c = loadConfig(base({ YTDLP_COOKIES_FILE: file, YOUTUBE_COOKIES_JSON: COOKIES_JSON }));
+      expect(c.cookiesConfigured).toBe(true);
+      expect(c.cookiesFile).toBe(file);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('YTDLP_COOKIES_FILE sin permiso de lectura → fatal', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'setube-ck-'));
+    const file = path.join(dir, 'ck.txt');
+    fs.writeFileSync(file, '# Netscape HTTP Cookie File\n');
+    fs.chmodSync(file, 0o000);
+    try {
+      expect(keysOf(() => loadConfig(base({ YTDLP_COOKIES_FILE: file })))).toEqual(['YTDLP_COOKIES_FILE']);
+    } finally {
+      fs.chmodSync(file, 0o600);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('redact del logger', () => {
+  it('censura config.redisUrl, req.headers.cookie y body.turnstileToken', async () => {
+    const { lines, stream } = memStream();
+    const app = Fastify({ logger: loggerOptions({ logLevel: 'info', isProd: true }, stream) });
+    await app.ready();
+    app.log.info({ config: { redisUrl: `redis://:${HEX}@redis:6379/0`, ipHashSalt: 'sal-secreta' } }, 'prueba');
+    app.log.info({ req: { headers: { cookie: 'SID=cookie-secreta' } }, body: { turnstileToken: 'token-secreto' } }, 'prueba2');
+    await app.close();
+    const out = lines.join('');
+    expect(out).toContain('[redacted]');
+    expect(out).not.toContain(HEX);
+    expect(out).not.toContain('sal-secreta');
+    expect(out).not.toContain('cookie-secreta');
+    expect(out).not.toContain('token-secreto');
+  });
+});

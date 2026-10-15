@@ -2,7 +2,9 @@ node_modules
 dist
 output
 .env
+.env.development
+secrets
 .git
-*.log
+test
+scripts
 *.md
-.gitignore
