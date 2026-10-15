@@ -27,8 +27,8 @@ export function fakeRedis(handlers: Record<string, Handler> = {}): Redis {
 
 export const ORIGIN = 'https://setube.example';
 
-export async function buildFakeApp(handlers: Record<string, Handler> = {}, deps: AppDeps = {}) {
-  const config = loadConfig({ NODE_ENV: 'test', LOG_LEVEL: 'silent', REDIS_URL: 'redis://127.0.0.1:6390', CORS_ORIGINS: ORIGIN });
+export async function buildFakeApp(handlers: Record<string, Handler> = {}, deps: AppDeps = {}, env: Record<string, string> = {}) {
+  const config = loadConfig({ NODE_ENV: 'test', LOG_LEVEL: 'silent', REDIS_URL: 'redis://127.0.0.1:6390', CORS_ORIGINS: ORIGIN, ...env });
   const app = await buildApp({
     config,
     deps: { redis: fakeRedis(handlers), subscriber: fakeRedis(), logger: false, ...deps },

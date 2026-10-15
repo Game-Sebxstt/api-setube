@@ -3,7 +3,7 @@ import type { FastifyPluginAsyncTypebox } from '@fastify/type-provider-typebox';
 import type { FastifyBaseLogger, FastifyReply, FastifyRequest } from 'fastify';
 import { AppError, type ErrorCode } from '../lib/errors.js';
 import { contentDisposition } from '../lib/http/content-disposition.js';
-import { ipHash } from '../lib/ip.js';
+import { clientIp, ipHash } from '../lib/ip.js';
 import { Semaphore } from '../lib/jobs/semaphore.js';
 import { openSession, type Session } from '../lib/jobs/session.js';
 import { archiveName, runArchive } from '../lib/jobs/stream-archive.js';
@@ -95,7 +95,7 @@ const downloadsRoute: FastifyPluginAsyncTypebox = async (app) => {
         log: req.log,
         view,
         jobId,
-        ipHash: ipHash(req.ip, config.ipHashSalt),
+        ipHash: ipHash(clientIp(req, config), config.ipHashSalt),
         maxPerIp: config.maxStreamsPerIp,
         slotLeaseMs: config.slotLeaseMs,
         jobTtlSec: config.jobTtlSec,

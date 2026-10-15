@@ -9,7 +9,8 @@ import { loggerOptions } from './lib/logger.js';
 import { configureProc } from './lib/media/proc.js';
 import type { PubSub } from './lib/pubsub.js';
 import { createMetadata, type MetadataService } from './lib/youtube/metadata.js';
-import { createOembed, type OembedService } from './lib/youtube/oembed.js';
+import { headerIp } from './lib/ip.js';
+import { createOembed, throttledWarn, type OembedService } from './lib/youtube/oembed.js';
 import { createPlaylists, type PlaylistService } from './lib/youtube/playlist.js';
 import errorsPlugin from './plugins/errors.js';
 import redisPlugin from './plugins/redis.js';
@@ -21,6 +22,7 @@ import eventsRoute from './routes/events.js';
 import healthRoute from './routes/health.js';
 import jobsRoute from './routes/jobs.js';
 import playlistsRoute from './routes/playlists.js';
+import previewRoute, { type PreviewTuning } from './routes/preview.js';
 import resolveRoute from './routes/resolve.js';
 import videosRoute from './routes/videos.js';
 
@@ -38,6 +40,11 @@ export interface AppDeps {
   lifecycle?: Lifecycle;
   youtube?: Partial<YoutubeServices>;
   streams?: StreamTuning;
+  preview?: PreviewTuning;
+}
+
+export function proxyStartupWarnings(config: Pick<Config, 'isProd' | 'trustProxy' | 'clientIpHeader'>): string[] {
+  return config.isProd && config.trustProxy === false && !config.clientIpHeader ? ['trust_proxy_disabled'] : [];
 }
 
 export interface StreamTuning {
@@ -55,7 +62,7 @@ declare module 'fastify' {
     pubsub: PubSub;
     lifecycle: Lifecycle;
     yt: YoutubeServices;
-    deps: { fetch: typeof fetch; streams?: StreamTuning };
+    deps: { fetch: typeof fetch; streams?: StreamTuning; preview?: PreviewTuning };
     semaphore: Semaphore;
   }
 }
@@ -90,10 +97,23 @@ export async function buildApp({ config, deps = {} }: { config: Config; deps?: A
   const lifecycle = deps.lifecycle ?? new Lifecycle();
   app.decorate('config', config);
   app.decorate('lifecycle', lifecycle);
-  app.decorate('deps', { fetch: deps.fetch ?? globalThis.fetch, streams: deps.streams });
+  app.decorate('deps', { fetch: deps.fetch ?? globalThis.fetch, streams: deps.streams, preview: deps.preview });
 
+  let hopsSeen = false;
+  const ipWarn = throttledWarn(app.log);
   app.addHook('onRequest', async (req, reply) => {
     reply.header('x-request-id', req.id);
+    const h = req.headers;
+    // Diagnóstico de la cadena de proxies en la primera petición, sin registrar IPs
+    if (!hopsSeen) {
+      hopsSeen = true;
+      const xffEntries = String(h['x-forwarded-for'] ?? '').split(',').filter(Boolean).length;
+      app.log.info(
+        { xffEntries, cfConnectingIp: Boolean(h['cf-connecting-ip']), trustProxy: config.trustProxy, clientIpHeader: config.clientIpHeader },
+        'proxy_hops_seen',
+      );
+    }
+    if (config.clientIpHeader && req.url !== '/health' && !headerIp(h, config.clientIpHeader)) ipWarn('client_ip_header_missing');
   });
 
   await app.register(errorsPlugin);
@@ -131,6 +151,7 @@ export async function buildApp({ config, deps = {} }: { config: Config; deps?: A
   await app.register(playlistsRoute);
   await app.register(jobsRoute);
   await app.register(eventsRoute);
+  await app.register(previewRoute);
   // fastify-plugin no se usa: el decorador `semaphore` queda en el scope de las rutas de descarga
   await app.register(downloadsRoute);
 

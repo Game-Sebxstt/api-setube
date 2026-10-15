@@ -3,7 +3,7 @@ import helmet from '@fastify/helmet';
 import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
 import { AppError } from '../lib/errors.js';
-import { ipHash } from '../lib/ip.js';
+import { clientIp, ipHash } from '../lib/ip.js';
 
 export default fp(
   async (app) => {
@@ -17,7 +17,7 @@ export default fp(
     await app.register(cors, {
       origin: config.corsOrigins,
       methods: ['GET', 'POST', 'DELETE'],
-      allowedHeaders: ['content-type', 'last-event-id'],
+      allowedHeaders: ['content-type', 'last-event-id', 'range'],
       exposedHeaders: ['x-request-id', 'retry-after'],
       credentials: false,
       maxAge: 600,
@@ -32,7 +32,7 @@ export default fp(
       redis: app.redis,
       nameSpace: 'rl:',
       skipOnError: true,
-      keyGenerator: (req) => ipHash(req.ip, config.ipHashSalt),
+      keyGenerator: (req) => ipHash(clientIp(req, config), config.ipHashSalt),
       errorResponseBuilder: (_req, ctx) => {
         const retryAfterSec = Math.max(1, Math.ceil(ctx.ttl / 1000));
         return new AppError('RATE_LIMITED', { details: { retryAfterSec } });

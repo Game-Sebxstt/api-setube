@@ -1,5 +1,5 @@
 import closeWithGrace from 'close-with-grace';
-import { buildApp } from './app.js';
+import { buildApp, proxyStartupWarnings } from './app.js';
 import { ConfigError, loadConfig, type Config } from './config/env.js';
 import { binaryVersion, configureProc, prepareTmp, SETUBE_TMP } from './lib/media/proc.js';
 
@@ -48,6 +48,7 @@ async function main(): Promise<void> {
   }
 
   const app = await buildApp({ config });
+  for (const w of proxyStartupWarnings(config)) app.log.warn({}, w);
 
   closeWithGrace({ delay: config.shutdownGraceMs, logger: app.log }, async ({ err, signal }) => {
     if (err) app.log.fatal({ err }, 'fatal_error');

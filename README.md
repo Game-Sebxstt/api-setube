@@ -50,6 +50,7 @@ El WAV sale con cabecera RIFF de tamaño indeterminado y el M4A/MP4 como MP4 fra
 | GET | `/api/config` | Límites y formatos públicos (ver más abajo). |
 | POST | `/api/resolve` | Recibe una lista de enlaces y devuelve qué es cada uno (video, playlist o inválido) con datos de oEmbed. |
 | GET | `/api/videos/:videoId` | Metadata completa de un video con yt-dlp. |
+| GET | `/api/videos/:videoId/audio` | Audio original del video para escucharlo en el navegador, con soporte de `Range` (ver «Escucha en streaming»). |
 | POST | `/api/playlists/resolve` | Lista los videos de una playlist (hasta `MAX_PLAYLIST_ITEMS`). |
 | POST | `/api/jobs` | Crea un job: `{ items: [{ videoId }], format, quality?, turnstileToken? }`. Responde 201. |
 | GET | `/api/jobs/:id` | Estado actual del job y de sus items. |
@@ -58,7 +59,7 @@ El WAV sale con cabecera RIFF de tamaño indeterminado y el M4A/MP4 como MP4 fra
 | GET | `/api/jobs/:id/items/:itemId/file` | Descarga un item convertido, en streaming. |
 | GET | `/api/jobs/:id/archive` | Descarga todos los items válidos en un ZIP, en streaming. |
 
-Rate limits por IP (por minuto): 10 en `POST /api/jobs` y `POST /api/playlists/resolve`, 20 en las descargas, 30 en `/api/resolve`, SSE y `DELETE`, 120 en `/api/videos`. El resto usa `RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW_MS`.
+Rate limits por IP (por minuto): 10 en `POST /api/jobs` y `POST /api/playlists/resolve`, 20 en las descargas, 30 en `/api/resolve`, SSE y `DELETE`, 120 en `/api/videos`, 60 en el audio (`PREVIEW_RATE_LIMIT_MAX`). El resto usa `RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW_MS`.
 
 Todos los errores tienen la misma forma:
 
@@ -69,7 +70,24 @@ Todos los errores tienen la misma forma:
 }
 ```
 
-`details` es opcional. Los códigos y sus estados HTTP están en `src/lib/errors.ts` (por ejemplo `INVALID_URL` 400, `LIMIT_ITEMS` 413, `RATE_LIMITED` 429, `QUEUE_FULL` 503, `UPSTREAM_BLOCKED` 503).
+`details` es opcional. Los códigos y sus estados HTTP están en `src/lib/errors.ts` (por ejemplo `INVALID_URL` 400, `LIMIT_ITEMS` 413, `RATE_LIMITED` 429, `TOO_MANY_PREVIEWS` 429, `QUEUE_FULL` 503, `UPSTREAM_BLOCKED` 503).
+
+## Escucha en streaming
+
+`GET /api/videos/:videoId/audio?codec=aac|opus&sid=<32 hex>` deja escuchar el audio de un video antes de convertirlo. Es un proxy del audio original de YouTube: no usa ffmpeg, no escribe a disco y no ocupa turnos de la cola de conversión.
+
+- Formato: por defecto m4a/AAC (itag 140, `audio/mp4`), que es el que más navegadores reproducen. Si el video no lo tiene, sirve webm/opus (`audio/webm`). Con `?codec=opus` el orden se invierte. El `Content-Type` siempre corresponde al formato servido.
+- La URL firmada sale del info JSON que ya está en Redis; si falta o caducó, se vuelve a pedir a yt-dlp.
+- Hacia YouTube se piden tramos de 10 MiB como máximo (`PREVIEW_CHUNK_BYTES`), igual que hace yt-dlp, aunque el navegador pida `bytes=0-`. Las peticiones abiertas o muy grandes YouTube las sirve a ~30 KiB/s.
+- Respuestas: `206` con `Content-Range` si llega `Range`; `200` con el archivo completo si no; `416` con `Content-Range: bytes */T` si el rango queda fuera del archivo. Siempre con `Accept-Ranges: bytes`, `Content-Length`, `ETag` (para `If-Range`) y `Cache-Control: private, max-age=600`. Los errores llevan `Cache-Control: no-store` y la forma única de error.
+- Si YouTube responde 403 o 410, la API reintenta la misma URL, después la original y, como último paso, vuelve a extraer la metadata, sin que el navegador lo note. Si el formato sigue rechazado, queda marcado 2 minutos y se responde `UPSTREAM_FORBIDDEN`.
+- Si el navegador cierra la conexión, la petición a YouTube se cancela al momento. El envío respeta el ritmo de lectura del navegador, así que la memoria por oyente es pequeña.
+- Límites: `PREVIEW_MAX_STREAMS_PER_IP` reproductores por IP (`TOO_MANY_PREVIEWS` 429), `PREVIEW_MAX_STREAMS_PER_INSTANCE` conexiones por instancia (`INSTANCE_BUSY` 503), `PREVIEW_RATE_LIMIT_MAX` peticiones por minuto, `MAX_DURATION_AUDIO_SEC` como duración máxima (`LIMIT_DURATION`) y sin directos (`LIVE_NOT_SUPPORTED`). El `sid` identifica al reproductor de cada pestaña: todas sus conexiones (los saltos en la barra abren varias) cuentan como uno.
+- Si llegan `Origin` o `Referer` de un origen que no está en `CORS_ORIGINS`, responde 403. Sin ninguno de los dos, se acepta.
+- `PREVIEW_ENABLED=false` apaga la ruta (`SERVICE_UNAVAILABLE` 503) y `/api/config` pasa a `preview: false`, así la web oculta el botón.
+- Railway corta cualquier petición HTTP a los 15 minutos. En audios largos el navegador retoma solo con un `Range` desde donde iba, así que la escucha sigue.
+
+Cada petición deja una línea `preview_finished` en el log con el formato, los bytes, el resultado (`ok`, `error`, `client_closed`, `idle`, `superseded` o `shutdown`) y los reintentos. Nunca registra URLs, cabeceras, IPs ni el `sid` en claro.
 
 ## Desarrollo local
 
@@ -140,6 +158,7 @@ Los valores por defecto de esta tabla son los del código (`src/config/env.ts`);
 | `LOG_LEVEL` | `info` | `fatal`, `error`, `warn`, `info`, `debug`, `trace` o `silent`. |
 | `CORS_ORIGINS` | `http://localhost:3000` | Orígenes permitidos, separados por coma, coincidencia exacta. |
 | `TRUST_PROXY` | `false` | `false`, `true`, número de saltos o lista de CIDR. Detrás de un proxy con un salto: `1`. |
+| `CLIENT_IP_HEADER` | vacío | Cabecera de la que se toma la IP real del cliente (rate limit, topes por IP y Turnstile). Detrás de Cloudflare: `cf-connecting-ip`. Si falta o no trae una IP válida, se usa la que deduce `TRUST_PROXY`. |
 | `IP_HASH_SALT` | vacío | Secreto para anonimizar IPs. Obligatorio en producción. Si falta en desarrollo, se genera uno al azar. |
 
 ### Redis
@@ -237,6 +256,17 @@ Los valores por defecto de esta tabla son los del código (`src/config/env.ts`);
 |---|---|---|
 | `TURNSTILE_SECRET` | vacío | Secreto de Cloudflare Turnstile. Vacío = desactivado. El cliente necesita `NEXT_PUBLIC_TURNSTILE_SITE_KEY`. |
 
+### Escucha en streaming
+
+| Variable | Default | Descripción |
+|---|---|---|
+| `PREVIEW_ENABLED` | `true` | Activa la ruta de audio. Con `false` responde 503 y la web oculta el botón de escuchar. |
+| `PREVIEW_MAX_STREAMS_PER_IP` | `4` | Reproductores simultáneos por IP. |
+| `PREVIEW_MAX_STREAMS_PER_INSTANCE` | `100` | Conexiones de audio abiertas por instancia. |
+| `PREVIEW_RATE_LIMIT_MAX` | `60` | Peticiones por minuto e IP a la ruta de audio. |
+| `PREVIEW_CHUNK_BYTES` | `10485760` | Tamaño de cada tramo pedido a YouTube (10 MiB). Entre 1048576 y 10485760. |
+| `PREVIEW_IDLE_TIMEOUT_MS` | `60000` | Corta la conexión si el navegador deja de leer durante este tiempo. Mínimo 5000. |
+
 ### Dónde se configuran
 
 - Railway: en las variables del servicio de la API.
@@ -262,11 +292,13 @@ La API valida la configuración al iniciar. Si algo no cuadra, registra un log `
 - `REDIS_URL` con protocolo `redis:`/`rediss:` y contraseña vacía o hex de 32+ caracteres.
 - `IP_HASH_SALT` presente en producción.
 - `CORS_ORIGINS` con al menos un origen.
+- `PREVIEW_CHUNK_BYTES` entre 1048576 y 10485760, y `PREVIEW_IDLE_TIMEOUT_MS` de al menos 5000.
+- `CLIENT_IP_HEADER` vacío o un nombre de cabecera válido (letras, números y guiones, hasta 64; se pasa a minúsculas).
 - Si hay `YTDLP_COOKIES_FILE`, que el archivo se pueda leer.
 
 ### `/api/config`
 
-El cliente lee los límites de `GET /api/config` (caché de 5 min), así que al cambiar las variables la web se ajusta sola. Expone `maxItemsPerJob`, `maxPlaylistItems`, `maxDurationAudioSec`, `maxDurationVideoSec`, las calidades por formato, las calidades por defecto (mp3 192, mp4 720) y si Turnstile está activo.
+El cliente lee los límites de `GET /api/config` (caché de 5 min), así que al cambiar las variables la web se ajusta sola. Expone `maxItemsPerJob`, `maxPlaylistItems`, `maxDurationAudioSec`, `maxDurationVideoSec`, las calidades por formato, las calidades por defecto (mp3 192, mp4 720), si Turnstile está activo y si la escucha en streaming está disponible (`preview`). Por esa caché, apagar `PREVIEW_ENABLED` puede tardar hasta 5 minutos en reflejarse en la web.
 
 ## Producción con Docker Compose
 
@@ -280,6 +312,8 @@ docker compose up -d --build --wait
 - Servicios: `redis` (sin puertos publicados, red interna, sin persistencia y con comandos peligrosos deshabilitados), `api` (puerto 4000, sistema de archivos de solo lectura, `/tmp` en tmpfs de 128 MB, sin capabilities) y `web` (puerto 3000).
 - Ponlo detrás de un proxy con TLS y HTTP/2 (Cloudflare, Caddy). HTTP/2 importa porque el navegador abre un SSE y una descarga por job, y en HTTP/1.1 solo hay 6 conexiones por origen.
 - Con proxy define `TRUST_PROXY` (normalmente `1`). Si no, todos los usuarios comparten la IP del proxy en el rate limit. Si se pone de más, cualquiera puede falsear `X-Forwarded-For`.
+- Con Cloudflare (nube naranja) delante de Railway: `TRUST_PROXY=1` y `CLIENT_IP_HEADER=cf-connecting-ip`. Sin Cloudflare, solo `TRUST_PROXY=1`. Quien entre directo al dominio de Railway, saltándose Cloudflare, puede falsear esa cabecera; se acepta porque estos topes frenan abusos, no controlan el acceso.
+- En la primera petición la API registra `proxy_hops_seen` (cuántas entradas trae `X-Forwarded-For` y si llega `CF-Connecting-IP`, sin IPs). Si `CLIENT_IP_HEADER` está puesto y una petición no la trae, avisa con `client_ip_header_missing`; en producción sin `TRUST_PROXY` ni `CLIENT_IP_HEADER` avisa con `trust_proxy_disabled`.
 - `docker compose stop` da 40 s: la API deja de aceptar descargas, cierra los SSE con `server-restart` y termina los procesos en curso dentro de `SHUTDOWN_GRACE_MS`.
 - Para actualizar yt-dlp cambia `YTDLP_VERSION` y los dos `YTDLP_SHA256_*` del `Dockerfile` (los valores están en `SHA2-256SUMS` del release) y reconstruye.
 
@@ -325,6 +359,7 @@ openssl rand -hex 32
 | `IP_HASH_SALT` | un hex generado igual que la contraseña |
 | `CORS_ORIGINS` | `https://setube.sebxstt.dev,https://${{web.RAILWAY_PUBLIC_DOMAIN}}` |
 | `TRUST_PROXY` | `1` |
+| `CLIENT_IP_HEADER` | `cf-connecting-ip` (solo con Cloudflare delante) |
 | `CONVERT_CONCURRENCY` | los vCPU de tu plan |
 | `CONVERSION_WALL_TIMEOUT_MS` | `840000` |
 | `MAX_ITEMS_PER_JOB` | `20` (recomendado) |
@@ -332,6 +367,41 @@ openssl rand -hex 32
 - `?family=0` es obligatorio: la red privada de Railway es IPv6 y ioredis por defecto solo resuelve IPv4. Sin eso la API no encuentra Redis.
 - `CONVERSION_WALL_TIMEOUT_MS=840000` (14 min) porque Railway corta las peticiones HTTP a los 15 minutos. Así la API corta el item con un error claro antes de que lo haga el proxy.
 - Si `CONVERT_CONCURRENCY` es menor que 3, baja también `ZIP_PARALLEL_AUDIO` a ese valor o la API no arranca.
+
+Bloque para pegar en el editor «Raw» de variables de Railway (cambia los valores entre `<>`):
+
+```env
+PORT="4000"
+NODE_ENV="production"
+LOG_LEVEL="info"
+REDIS_URL="${{Redis.REDIS_URL}}?family=0"
+IP_HASH_SALT="<hex de 64 caracteres>"
+CORS_ORIGINS="https://setube.sebxstt.dev"
+TRUST_PROXY="1"
+CLIENT_IP_HEADER="cf-connecting-ip"
+CONVERT_CONCURRENCY="<vCPU de tu plan>"
+CONVERSION_WALL_TIMEOUT_MS="840000"
+MAX_ITEMS_PER_JOB="20"
+PREVIEW_ENABLED="true"
+PREVIEW_MAX_STREAMS_PER_IP="4"
+PREVIEW_MAX_STREAMS_PER_INSTANCE="100"
+PREVIEW_RATE_LIMIT_MAX="60"
+PREVIEW_CHUNK_BYTES="10485760"
+PREVIEW_IDLE_TIMEOUT_MS="60000"
+```
+
+### Prueba de la escucha tras desplegar
+
+1. Un rango pequeño debe dar `206`:
+
+   ```powershell
+   curl.exe -sD - -r 0-1023 -o NUL "https://api-setube.sebxstt.dev/api/videos/jNQXAC9IVRw/audio" -H "Referer: https://setube.sebxstt.dev/"
+   ```
+
+   En macOS o Linux usa `curl` y `-o /dev/null`.
+2. En los logs, `proxy_hops_seen` debe mostrar `cfConnectingIp: true`, sin avisos `client_ip_header_missing` ni `trust_proxy_disabled`.
+3. Desde una misma red, cinco `curl --limit-rate 16k` en paralelo, cada uno con un `&sid=` distinto de 32 hex: el quinto debe dar `429 TOO_MANY_PREVIEWS`. Mientras siguen abiertos, uno desde otra red (por ejemplo, datos móviles) debe dar `206`.
+4. Si el paso 1 da `502 UPSTREAM_FORBIDDEN` o `503 UPSTREAM_BLOCKED` de forma persistente, pon `PREVIEW_ENABLED=false` y revisa `retry403` y `urlIpFamily` en `preview_finished` y `preview_forbidden`. Si `urlIpFamily` es `6`, prueba con `YTDLP_ARGS_PREFIX='["--force-ipv4"]'` y `NODE_OPTIONS=--dns-result-order=ipv4first`.
 
 ### Healthcheck y dominio
 
@@ -346,7 +416,8 @@ Railway no tiene Docker secrets, así que usa `YOUTUBE_COOKIES_JSON` como variab
 
 - Railway sale a internet con IPs de datacenter y YouTube puede responder «Sign in to confirm you're not a bot» (`UPSTREAM_BLOCKED`). Las cookies y mantener yt-dlp al día lo mitigan, pero no lo eliminan.
 - El límite de 15 minutos por petición afecta sobre todo a los ZIP grandes. Bajar `MAX_ITEMS_PER_JOB` ayuda a que entren en ese tiempo.
-- Cada descarga sale completa por la red y Railway cobra el tráfico de salida.
+- Cada descarga sale completa por la red y Railway cobra el tráfico de salida. El audio que se escucha en la web también pasa por la API y cuenta como tráfico de salida.
+- El corte de 15 minutos también afecta a la escucha, pero ahí no se nota: el navegador vuelve a pedir el audio con `Range` desde donde iba.
 - Puedes subir réplicas de la API sin cambiar nada: la cola, los jobs y el rate limit viven en Redis.
 
 ## Seguridad y límites conocidos
@@ -354,7 +425,7 @@ Railway no tiene Docker secrets, así que usa `YOUTUBE_COOKIES_JSON` como variab
 - La API es pública y no tiene autenticación. La protegen el rate limit por IP, los topes de descargas por IP e instancia, la cola global y los límites de items y duración. Turnstile es opcional (`TURNSTILE_SECRET` + `NEXT_PUBLIC_TURNSTILE_SITE_KEY`).
 - Las IPs nunca se guardan en claro: se usa un hash con `IP_HASH_SALT`.
 - No hay caché de archivos: cada descarga vuelve a convertir.
-- Si la conexión se corta, la descarga empieza de cero (no hay soporte de `Range`).
+- Si la conexión se corta, la descarga de una conversión empieza de cero (las descargas de `/file` y `/archive` no admiten `Range`; la ruta de audio sí).
 - Las cookies solo entran por archivo secreto o variable de entorno, nunca en el código ni en la imagen.
 - Los cambios de YouTube (SABR, PO tokens) pueden romper descargas hasta actualizar yt-dlp.
 

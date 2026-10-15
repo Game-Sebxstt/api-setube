@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { FastifyPluginAsyncTypebox } from '@fastify/type-provider-typebox';
 import type { FastifyBaseLogger } from 'fastify';
 import { AppError, ERROR_CATALOG, type ErrorCode } from '../lib/errors.js';
-import { ipHash } from '../lib/ip.js';
+import { clientIp, ipHash } from '../lib/ip.js';
 import { cancelJob, createJob, readJob, type NewItem } from '../lib/jobs/store.js';
 import { verifyTurnstile } from '../lib/turnstile.js';
 import type { OutputFormat, Quality } from '../lib/youtube/formats.js';
@@ -69,7 +69,7 @@ const jobsRoute: FastifyPluginAsyncTypebox = async (app) => {
       await verifyTurnstile({
         secret: config.turnstileSecret,
         token: req.body.turnstileToken,
-        remoteIp: req.ip,
+        remoteIp: clientIp(req, config),
         fetch: app.deps.fetch,
         log: req.log,
       });
@@ -136,7 +136,7 @@ const jobsRoute: FastifyPluginAsyncTypebox = async (app) => {
       const jobId = randomUUID();
       const now = Date.now();
       const { items: created } = await critical(
-        createJob(app.redis, { jobId, format, quality, ipHash: ipHash(req.ip, config.ipHashSalt), items: newItems, ttlSec: config.jobTtlSec, now }),
+        createJob(app.redis, { jobId, format, quality, ipHash: ipHash(clientIp(req, config), config.ipHashSalt), items: newItems, ttlSec: config.jobTtlSec, now }),
         req.log,
       );
       reply.code(201);

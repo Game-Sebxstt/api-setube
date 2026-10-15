@@ -17,6 +17,7 @@ export const VideoResponse = Type.Object(
         sourceCodec: Type.String(),
         sourceAbrKbps: Nullable(Type.Number()),
         m4aNative: Type.Boolean(),
+        preview: Type.Object({ aac: Type.Boolean(), opus: Type.Boolean() }, { additionalProperties: false }),
       },
       { additionalProperties: false },
     ),

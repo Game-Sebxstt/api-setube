@@ -1,3 +1,5 @@
+import { isIP } from 'node:net';
+
 export type OutputFormat = 'mp3' | 'm4a' | 'wav' | 'mp4';
 export type Mp3Quality = 128 | 192 | 320;
 export type Mp4Quality = 360 | 480 | 720 | 1080 | 'best';
@@ -211,6 +213,99 @@ export function estimateBytes(
     total += p.bytes;
   }
   return total;
+}
+
+export type Codec = 'aac' | 'opus';
+
+export interface Source {
+  formatId: string;
+  url: string;
+  headers: Record<string, string>;
+  size: number | null;
+  contentType: 'audio/mp4' | 'audio/webm';
+  expire: number;
+  availableAt: number | null;
+  urlIpFamily: 4 | 6 | null;
+}
+
+const DRC = /(^|-)drc(-|$)/;
+const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+
+function googlevideoUrl(raw: unknown): URL | null {
+  if (typeof raw !== 'string') return null;
+  try {
+    const u = new URL(raw);
+    return u.protocol === 'https:' && u.hostname.endsWith('.googlevideo.com') ? u : null;
+  } catch {
+    return null;
+  }
+}
+
+function previewHeaders(raw: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (isObj(raw)) {
+    for (const [k, v] of Object.entries(raw)) {
+      const lk = k.toLowerCase();
+      if (lk === 'cookie' || lk === 'accept-encoding' || lk === 'range' || typeof v !== 'string') continue;
+      out[k] = v;
+    }
+  }
+  out['Accept-Encoding'] = 'identity';
+  return out;
+}
+
+const ipFamily = (u: URL): 4 | 6 | null => {
+  const fam = isIP(u.searchParams.get('ip') ?? '');
+  return fam === 4 || fam === 6 ? fam : null;
+};
+
+const posInt = (v: unknown): number | null => {
+  const n = typeof v === 'string' && /^\d+$/.test(v) ? Number(v) : v;
+  return typeof n === 'number' && Number.isSafeInteger(n) && n > 0 ? n : null;
+};
+
+// Orden total y estable: la misma info siempre produce el mismo primer candidato
+export function rankPreviewFormats(info: Record<string, unknown>, codec?: Codec): Source[] {
+  const formats = Array.isArray(info.formats) ? info.formats.filter(isObj) : [];
+  type Cand = { f: Record<string, unknown>; u: URL; group: Codec };
+  const cands: Cand[] = [];
+  for (const f of formats) {
+    if (str(f.vcodec) !== 'none' || str(f.acodec) === '' || str(f.acodec) === 'none') continue;
+    if (str(f.protocol) !== 'https' || f.has_drm === true || str(f.format_id) === '') continue;
+    const u = googlevideoUrl(f.url);
+    if (!u) continue;
+    const acodec = str(f.acodec);
+    const ext = str(f.ext);
+    if (ext === 'm4a' && acodec.startsWith('mp4a')) cands.push({ f, u, group: 'aac' });
+    else if (ext === 'webm' && acodec.startsWith('opus')) cands.push({ f, u, group: 'opus' });
+  }
+  const first: Codec = codec === 'opus' ? 'opus' : 'aac';
+  const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : -Infinity);
+  const asc = (x: number, y: number) => (x === y ? 0 : x < y ? -1 : 1);
+  const lc = (s: string) => (s.startsWith('mp4a.40.2') ? 0 : s.startsWith('mp4a.40.5') ? 1 : 2);
+  cands.sort((a, b) => {
+    const ida = str(a.f.format_id);
+    const idb = str(b.f.format_id);
+    return (
+      asc(a.group === first ? 0 : 1, b.group === first ? 0 : 1) ||
+      asc(DRC.test(ida) ? 1 : 0, DRC.test(idb) ? 1 : 0) ||
+      asc(n(b.f.language_preference), n(a.f.language_preference)) ||
+      asc(lc(str(a.f.acodec)), lc(str(b.f.acodec))) ||
+      asc(n(b.f.quality), n(a.f.quality)) ||
+      asc(n(b.f.abr), n(a.f.abr)) ||
+      (ida < idb ? -1 : ida > idb ? 1 : 0)
+    );
+  });
+  return cands.map(({ f, u, group }) => ({
+    formatId: str(f.format_id),
+    url: f.url as string,
+    headers: previewHeaders(f.http_headers),
+    size: posInt(f.filesize) ?? posInt(f.clen) ?? posInt(u.searchParams.get('clen')),
+    contentType: group === 'aac' ? 'audio/mp4' : 'audio/webm',
+    expire: Number(u.searchParams.get('expire')) || 0,
+    availableAt: typeof f.available_at === 'number' && Number.isFinite(f.available_at) ? f.available_at : null,
+    urlIpFamily: ipFamily(u),
+  }));
 }
 
 const ZIP64_THRESHOLD = 3.5 * 2 ** 30;

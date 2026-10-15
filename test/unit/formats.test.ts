@@ -1,6 +1,14 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { deriveFormats, estimateBytes, forceZip64, selectFormats, type RawFormat } from '../../src/lib/youtube/formats.js';
+import {
+  deriveFormats,
+  estimateBytes,
+  forceZip64,
+  rankPreviewFormats,
+  selectFormats,
+  type Codec,
+  type RawFormat,
+} from '../../src/lib/youtube/formats.js';
 
 const sample = JSON.parse(readFileSync(new URL('../fixtures/info-sample.json', import.meta.url), 'utf8')) as { formats: RawFormat[] };
 const ON = { audioHlsFallback: true };
@@ -107,6 +115,74 @@ describe('selectFormats', () => {
   it('respaldo HLS desactivado → FORMAT_UNAVAILABLE only_fragmented', () => {
     const m = deriveFormats([a('234', 'mp4a.40.2', 'mp4', 128, 'm3u8_native')]);
     expect(selectFormats(m, 'mp3', 192, OFF)).toEqual({ ok: false, code: 'FORMAT_UNAVAILABLE', reason: 'only_fragmented' });
+  });
+});
+
+describe('rankPreviewFormats', () => {
+  const gv = (itag: string, q = '') => `https://rr1---sn-x.googlevideo.com/videoplayback?expire=1999999999&itag=${itag}${q}`;
+  const p = (id: string, over: Record<string, unknown> = {}) => {
+    const opus = id.startsWith('25');
+    return {
+      format_id: id, vcodec: 'none', protocol: 'https', url: gv(id),
+      ext: opus ? 'webm' : 'm4a', acodec: opus ? 'opus' : 'mp4a.40.2', abr: 128, filesize: 1000, ...over,
+    };
+  };
+  const ids = (info: Record<string, unknown>, codec?: Codec) => rankPreviewFormats(info, codec).map((s) => s.formatId);
+
+  it('140 por delante de 139, 140-drc y 251-0-drc; AAC primero por defecto', () => {
+    const info = { formats: [p('251-0-drc'), p('140-drc'), p('139', { acodec: 'mp4a.40.5', abr: 48 }), p('251'), p('140')] };
+    expect(ids(info)).toEqual(['140', '139', '140-drc', '251', '251-0-drc']);
+    expect(ids(info, 'aac')[0]).toBe('140');
+  });
+
+  it('language_preference manda dentro del grupo', () => {
+    const info = { formats: [p('140-1', { language_preference: -1 }), p('140-0', { language_preference: 10 })] };
+    expect(ids(info)).toEqual(['140-0', '140-1']);
+  });
+
+  it('codec=opus pone 251 primero y AAC detrás', () => {
+    expect(ids({ formats: [p('140'), p('251'), p('250', { abr: 70 })] }, 'opus')).toEqual(['251', '250', '140']);
+  });
+
+  it('sin AAC y con codec=aac el primero es opus; solo HLS da []', () => {
+    expect(ids({ formats: [p('251')] }, 'aac')).toEqual(['251']);
+    expect(ids({ formats: [p('233', { protocol: 'm3u8_native' })] })).toEqual([]);
+  });
+
+  it('excluye has_drm, hosts ajenos, http y formatos con video', () => {
+    const info = {
+      formats: [
+        p('140', { has_drm: true }),
+        p('141', { url: 'https://example.com/a.m4a' }),
+        p('142', { url: gv('142').replace('https:', 'http:') }),
+        p('18', { vcodec: 'avc1' }),
+        p('139'),
+      ],
+    };
+    expect(ids(info)).toEqual(['139']);
+  });
+
+  it('expire, urlIpFamily, size y cabeceras sin Cookie', () => {
+    const [s] = rankPreviewFormats({
+      formats: [p('140', { url: gv('140', '&ip=2001:db8::1&clen=777'), filesize: undefined, http_headers: { 'User-Agent': 'UA', cookie: 'x=1' } })],
+    });
+    expect(s).toMatchObject({ expire: 1999999999, urlIpFamily: 6, size: 777, contentType: 'audio/mp4' });
+    expect(s?.headers).toEqual({ 'User-Agent': 'UA', 'Accept-Encoding': 'identity' });
+    const [v4] = rankPreviewFormats({ formats: [p('251', { url: gv('251', '&ip=203.0.113.1') })] });
+    expect(v4).toMatchObject({ urlIpFamily: 4, size: 1000, contentType: 'audio/webm' });
+  });
+
+  it('available_at futuro no cambia el orden y el resultado es estable', () => {
+    const future = Math.floor(Date.now() / 1000) + 3600;
+    const info = { formats: [p('251'), p('140', { available_at: future }), p('139', { acodec: 'mp4a.40.5' })] };
+    expect(ids(info)[0]).toBe('140');
+    expect(rankPreviewFormats(info)[0]?.availableAt).toBe(future);
+    expect(ids(info)).toEqual(ids(JSON.parse(JSON.stringify(info)) as Record<string, unknown>));
+  });
+
+  it('fixture real: 140 y después 139; opus 251', () => {
+    expect(ids(sample as unknown as Record<string, unknown>)).toEqual(['140', '139', '251']);
+    expect(ids(sample as unknown as Record<string, unknown>, 'opus')[0]).toBe('251');
   });
 });
 

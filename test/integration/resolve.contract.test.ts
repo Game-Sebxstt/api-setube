@@ -181,6 +181,7 @@ describe('rutas base', () => {
       formats: { mp3: [128, 192, 320], m4a: [], wav: [], mp4: [360, 480, 720, 1080, 'best'] },
       defaults: { mp3: 192, mp4: 720 },
       turnstile: false,
+      preview: true,
     });
   });
 

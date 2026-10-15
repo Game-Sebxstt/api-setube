@@ -4,7 +4,7 @@ import path from 'node:path';
 import { Writable } from 'node:stream';
 import Fastify from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ConfigError, loadConfig } from '../../src/config/env.js';
+import { ConfigError, EnvSchema, loadConfig } from '../../src/config/env.js';
 import { loggerOptions } from '../../src/lib/logger.js';
 import { cookies } from '../../src/lib/media/cookies.js';
 
@@ -181,6 +181,43 @@ describe('loadConfig', () => {
       fs.chmodSync(file, 0o600);
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('variables de escucha en streaming', () => {
+  it('defaults', () => {
+    const c = loadConfig(base());
+    expect(c).toMatchObject({
+      clientIpHeader: null,
+      previewEnabled: true,
+      previewMaxStreamsPerIp: 4,
+      previewMaxStreamsPerInstance: 100,
+      previewRateLimitMax: 60,
+      previewChunkBytes: 10485760,
+      previewIdleTimeoutMs: 60000,
+    });
+  });
+
+  it('PREVIEW_ENABLED=false y CLIENT_IP_HEADER en minúsculas', () => {
+    const c = loadConfig(base({ PREVIEW_ENABLED: 'false', CLIENT_IP_HEADER: ' CF-Connecting-IP ' }));
+    expect(c.previewEnabled).toBe(false);
+    expect(c.clientIpHeader).toBe('cf-connecting-ip');
+  });
+
+  it.each([
+    ['PREVIEW_CHUNK_BYTES', { PREVIEW_CHUNK_BYTES: '1048575' }],
+    ['PREVIEW_CHUNK_BYTES', { PREVIEW_CHUNK_BYTES: '10485761' }],
+    ['PREVIEW_IDLE_TIMEOUT_MS', { PREVIEW_IDLE_TIMEOUT_MS: '4999' }],
+    ['CLIENT_IP_HEADER', { CLIENT_IP_HEADER: 'bad header!' }],
+    ['PREVIEW_MAX_STREAMS_PER_IP', { PREVIEW_MAX_STREAMS_PER_IP: '0' }],
+  ])('inválido: %s', (key, extra) => {
+    expect(keysOf(() => loadConfig(base(extra)))).toContain(key);
+  });
+
+  it('.env.example declara exactamente las variables del esquema', () => {
+    const text = fs.readFileSync(new URL('../../.env.example', import.meta.url), 'utf8');
+    const keys = text.split(/\r?\n/).flatMap((l) => /^([A-Z0-9_]+)=/.exec(l)?.[1] ?? []);
+    expect(new Set(keys)).toEqual(new Set(Object.keys(EnvSchema.properties)));
   });
 });
 

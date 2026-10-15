@@ -32,6 +32,7 @@ export function toPublicVideo(meta: Meta, config: Pick<Config, 'maxDurationAudio
       sourceCodec: opus ? 'opus' : m4a ? 'aac' : (hls?.acodec.split('.')[0] ?? 'desconocido'),
       sourceAbrKbps: src?.abr != null ? Math.round(src.abr) : null,
       m4aNative: !!m4a,
+      preview: { aac: !!m4a, opus: !!opus },
     },
     videoQualities: meta.video.map((v) => v.height),
     estimatedBytes: {

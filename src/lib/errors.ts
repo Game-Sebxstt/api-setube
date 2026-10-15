@@ -23,6 +23,7 @@ export const ERROR_CATALOG = {
   RATE_LIMITED: { status: 429, message: 'Demasiadas solicitudes. Espera un momento.' },
   TOO_MANY_STREAMS: { status: 429, message: 'Tienes demasiadas descargas simultáneas.' },
   TOO_MANY_SUBSCRIBERS: { status: 429, message: 'Demasiadas conexiones de progreso para esta conversión.' },
+  TOO_MANY_PREVIEWS: { status: 429, message: 'Tienes demasiadas reproducciones simultáneas.' },
   QUEUE_FULL: { status: 503, message: 'La cola de conversión está llena. Inténtalo más tarde.' },
   QUEUE_TIMEOUT: { status: 503, message: 'Se agotó la espera en la cola de conversión.' },
   INSTANCE_BUSY: { status: 503, message: 'El servidor está ocupado. Inténtalo más tarde.' },

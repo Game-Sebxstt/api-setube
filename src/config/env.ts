@@ -58,6 +58,13 @@ export const EnvSchema = Type.Object({
   SSE_MAX_PER_JOB: Int(5, 1),
   SHUTDOWN_GRACE_MS: Int(30000, 1),
   TURNSTILE_SECRET: Str(''),
+  CLIENT_IP_HEADER: Str(''),
+  PREVIEW_ENABLED: Bool(true),
+  PREVIEW_MAX_STREAMS_PER_IP: Int(4, 1),
+  PREVIEW_MAX_STREAMS_PER_INSTANCE: Int(100, 1),
+  PREVIEW_RATE_LIMIT_MAX: Int(60, 1),
+  PREVIEW_CHUNK_BYTES: Int(10485760, 1),
+  PREVIEW_IDLE_TIMEOUT_MS: Int(60000, 1),
 });
 
 type Env = Static<typeof EnvSchema>;
@@ -114,6 +121,13 @@ export interface Config {
   sseMaxPerJob: number;
   shutdownGraceMs: number;
   turnstileSecret: string | null;
+  clientIpHeader: string | null;
+  previewEnabled: boolean;
+  previewMaxStreamsPerIp: number;
+  previewMaxStreamsPerInstance: number;
+  previewRateLimitMax: number;
+  previewChunkBytes: number;
+  previewIdleTimeoutMs: number;
 }
 
 export class ConfigError extends Error {
@@ -197,6 +211,10 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env, log?: Cookie
   if (isProd && env.IP_HASH_SALT === '') bad.push('IP_HASH_SALT');
   const corsOrigins = env.CORS_ORIGINS.split(',').map((s) => s.trim()).filter(Boolean);
   if (corsOrigins.length === 0) bad.push('CORS_ORIGINS');
+  if (env.PREVIEW_CHUNK_BYTES < 1048576 || env.PREVIEW_CHUNK_BYTES > 10485760) bad.push('PREVIEW_CHUNK_BYTES');
+  if (env.PREVIEW_IDLE_TIMEOUT_MS < 5000) bad.push('PREVIEW_IDLE_TIMEOUT_MS');
+  const clientIpHeader = env.CLIENT_IP_HEADER.trim().toLowerCase();
+  if (clientIpHeader !== '' && !/^[a-z0-9-]{1,64}$/.test(clientIpHeader)) bad.push('CLIENT_IP_HEADER');
   if (bad.length) throw new ConfigError(bad);
 
   const cookiesFile = env.YTDLP_COOKIES_FILE || null;
@@ -258,5 +276,12 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env, log?: Cookie
     sseMaxPerJob: env.SSE_MAX_PER_JOB,
     shutdownGraceMs: env.SHUTDOWN_GRACE_MS,
     turnstileSecret: env.TURNSTILE_SECRET || null,
+    clientIpHeader: clientIpHeader || null,
+    previewEnabled: env.PREVIEW_ENABLED,
+    previewMaxStreamsPerIp: env.PREVIEW_MAX_STREAMS_PER_IP,
+    previewMaxStreamsPerInstance: env.PREVIEW_MAX_STREAMS_PER_INSTANCE,
+    previewRateLimitMax: env.PREVIEW_RATE_LIMIT_MAX,
+    previewChunkBytes: env.PREVIEW_CHUNK_BYTES,
+    previewIdleTimeoutMs: env.PREVIEW_IDLE_TIMEOUT_MS,
   };
 }

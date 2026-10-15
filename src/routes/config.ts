@@ -21,6 +21,7 @@ const PublicConfig = Type.Object(
     ),
     defaults: Type.Object({ mp3: Type.Integer(), mp4: Type.Integer() }, { additionalProperties: false }),
     turnstile: Type.Boolean(),
+    preview: Type.Boolean(),
   },
   { additionalProperties: false },
 );
@@ -35,6 +36,7 @@ const configRoute: FastifyPluginAsyncTypebox = async (app) => {
     formats: { mp3: [...MP3_QUALITIES], m4a: [], wav: [], mp4: [...MP4_QUALITIES] },
     defaults: { mp3: 192, mp4: 720 },
     turnstile: config.turnstileSecret !== null,
+    preview: config.previewEnabled,
   };
   app.get('/api/config', { schema: { response: { 200: PublicConfig } } }, async (_req, reply) => {
     reply.header('cache-control', 'public, max-age=300');
