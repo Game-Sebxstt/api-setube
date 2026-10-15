@@ -125,9 +125,11 @@ Límites:
 
 Con `YTDLP_PROXY` (`http://`, `https://` o `socks5://`, con `usuario:clave@` si el proveedor lo pide) yt-dlp sale por ese proxy en todas sus llamadas. Un proxy residencial es lo que más reduce los bloqueos, pero se paga por tráfico.
 
+El proxy necesita una IP de salida estable. Muchos proxies residenciales rotan la IP en cada conexión por defecto, y eso no sirve aquí: las URLs de googlevideo llevan la IP que las pidió (`ip=`) y la info JSON se guarda en Redis durante `INFO_JSON_TTL_SEC` (3 h) para reutilizarla en la escucha y en las descargas (`--load-info-json`), que abren conexiones nuevas. Con rotación por petición la escucha entra en 403 → refresco → 403 y las descargas con info JSON en caché fallan. Usa una sesión fija (sticky) del proveedor que dure al menos `INFO_JSON_TTL_SEC`, o baja `INFO_JSON_TTL_SEC` por debajo de la duración de la sesión.
+
 La escucha en streaming también sale por el mismo proxy, porque las URLs de googlevideo quedan atadas a la IP que las pidió. Usa `undici` (`ProxyAgent` para http/https y `Socks5ProxyAgent` para socks5). El soporte socks5 de undici es experimental: Node imprime un `ExperimentalWarning` al arrancar; si da problemas, usa un proxy http(s). El plugin del PO token le pasa el proxy al servidor `pot`, así que los retos de BotGuard también salen por él. La conexión entre la API y `pot` nunca pasa por el proxy.
 
-El proxy nunca se registra completo: en los logs aparece como `http://[redacted]@host:puerto`, y las líneas de error de yt-dlp se limpian de `usuario:clave@` antes de guardarse.
+El proxy nunca se registra completo: en los logs aparece como `http://[redacted]@host:puerto`, y las líneas de error de yt-dlp se limpian de `usuario:clave@` antes de guardarse. Eso sí, yt-dlp recibe el proxy completo en sus argumentos (`--proxy`), así que se puede leer en `/proc/<pid>/cmdline` desde dentro del contenedor mientras corre el proceso. Con un único usuario `node`, sistema de archivos de solo lectura y sin capabilities el riesgo es bajo, pero usa credenciales exclusivas para este proxy.
 
 ### Cookies de una cuenta secundaria
 
@@ -428,7 +430,7 @@ openssl rand -hex 32
 | `CONVERSION_WALL_TIMEOUT_MS` | `840000` |
 | `MAX_ITEMS_PER_JOB` | `20` (recomendado) |
 | `POT_PROVIDER_URL` | `http://${{pot.RAILWAY_PRIVATE_DOMAIN}}:4416` |
-| `YTDLP_PROXY` | vacío, o la URL de tu proxy si lo usas |
+| `YTDLP_PROXY` | vacío, o la URL de tu proxy si lo usas (con IP de salida fija: sesión sticky de al menos `INFO_JSON_TTL_SEC`) |
 
 - `POT_PROVIDER_URL` va con `http://`: el tráfico de la red privada ya va cifrado. Tras desplegar, el log de la API debe mostrar `pot_provider_ok`; si sale `pot_provider_unreachable`, revisa el nombre del servicio y el Custom Start Command de `pot`.
 - `?family=0` es obligatorio: la red privada de Railway es IPv6 y ioredis por defecto solo resuelve IPv4. Sin eso la API no encuentra Redis.
