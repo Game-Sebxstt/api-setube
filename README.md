@@ -89,6 +89,50 @@ Todos los errores tienen la misma forma:
 
 Cada petición deja una línea `preview_finished` en el log con el formato, los bytes, el resultado (`ok`, `error`, `client_closed`, `idle`, `superseded` o `shutdown`) y los reintentos. Nunca registra URLs, cabeceras, IPs ni el `sid` en claro.
 
+## Bloqueo de YouTube: PO token, proxy y cookies
+
+Desde IPs de datacenter (Railway, VPS) YouTube responde a menudo «Sign in to confirm you're not a bot» (`UPSTREAM_BLOCKED`) o 403 al descargar. Hay tres herramientas, de menos a más esfuerzo, y se pueden combinar.
+
+### PO token (servicio `pot`)
+
+El PO token (Proof of Origin) es una prueba que genera BotGuard, el sistema anti-bots de YouTube, para demostrar que la petición viene de un cliente real. Algunos clientes de YouTube lo exigen para servir los formatos (las peticiones a googlevideo, «GVS») y sin él responden 403 o marcan la IP. Cada token está atado al video, así que hay que generar uno por video.
+
+Setube usa [bgutil-ytdlp-pot-provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider), que tiene dos partes:
+
+- El servidor HTTP, que corre como servicio aparte (`pot`, imagen `brainicism/bgutil-ytdlp-pot-provider:2.0.2-node`, puerto 4416) y genera los tokens.
+- El plugin de yt-dlp, que va dentro de la imagen de la API en `/opt/yt-dlp/yt-dlp-plugins/`. El binario standalone de yt-dlp carga los zip de esa carpeta junto al ejecutable, sin depender de `HOME`. Su versión está en `BGUTIL_POT_VERSION` y `BGUTIL_POT_SHA256` del `Dockerfile` y tiene que coincidir con la del servidor.
+
+Con `POT_PROVIDER_URL` definido, cada llamada a yt-dlp (metadata, playlists y descargas) recibe `--extractor-args "youtubepot-bgutilhttp:base_url=<POT_PROVIDER_URL>"` y además `youtube:player_client=default,mweb`. El [PO Token Guide](https://github.com/yt-dlp/yt-dlp/wiki/PO-Token-Guide) de yt-dlp recomienda el cliente `mweb` con PO token para GVS; se suma a los clientes por defecto (`visionos`), que no necesitan token, así que si uno falla queda el otro. Con `POT_PROVIDER_URL` vacío los plugins se desactivan (`--no-plugin-dirs`) y yt-dlp funciona como antes.
+
+Al arrancar, la API registra `potProvider` en `setube_api_started` y hace un `GET /ping` al servidor: `pot_provider_ok` con la versión o `pot_provider_unreachable` como aviso. Si el servidor no responde la API arranca igual; yt-dlp sigue sin token.
+
+Para comprobar a mano que el token se genera, dentro del contenedor de la API:
+
+```sh
+yt-dlp -v --extractor-args "youtubepot-bgutilhttp:base_url=http://pot:4416" --extractor-args "youtube:player_client=default,mweb" -s "https://www.youtube.com/watch?v=jNQXAC9IVRw"
+```
+
+Deben aparecer `PO Token Providers: bgutil:http-2.0.2 (external)` y `Generating a gvs PO Token for mweb client via bgutil HTTP server`.
+
+Límites:
+
+- El PO token no garantiza nada: ayuda a que el tráfico parezca legítimo, pero no salta los bloqueos por IP. Si con token sigue saliendo «Sign in to confirm», hacen falta cookies o un proxy.
+- El servidor no tiene autenticación: nunca publiques su puerto ni le des dominio público.
+- El servidor escribe en su propio log los tokens que genera. Son de corta duración y atados a un video, pero no compartas esos logs.
+- Para actualizar, cambia a la vez la etiqueta de la imagen en compose/Railway y `BGUTIL_POT_VERSION` + `BGUTIL_POT_SHA256` (el `digest` del zip en el release de GitHub).
+
+### Proxy (`YTDLP_PROXY`)
+
+Con `YTDLP_PROXY` (`http://`, `https://` o `socks5://`, con `usuario:clave@` si el proveedor lo pide) yt-dlp sale por ese proxy en todas sus llamadas. Un proxy residencial es lo que más reduce los bloqueos, pero se paga por tráfico.
+
+La escucha en streaming también sale por el mismo proxy, porque las URLs de googlevideo quedan atadas a la IP que las pidió. Usa `undici` (`ProxyAgent` para http/https y `Socks5ProxyAgent` para socks5). El soporte socks5 de undici es experimental: Node imprime un `ExperimentalWarning` al arrancar; si da problemas, usa un proxy http(s). El plugin del PO token le pasa el proxy al servidor `pot`, así que los retos de BotGuard también salen por él. La conexión entre la API y `pot` nunca pasa por el proxy.
+
+El proxy nunca se registra completo: en los logs aparece como `http://[redacted]@host:puerto`, y las líneas de error de yt-dlp se limpian de `usuario:clave@` antes de guardarse.
+
+### Cookies de una cuenta secundaria
+
+Las cookies de una sesión iniciada son lo más efectivo contra «Sign in to confirm», pero YouTube puede limitar o banear la cuenta. Usa siempre una cuenta secundaria, exporta las cookies de una sesión nueva (formato Netscape) y no abras esa sesión en el navegador mientras la usa la API. Se configuran con `YTDLP_COOKIES_FILE` o `YOUTUBE_COOKIES_JSON` (ver «Cookies con Docker secrets» y la sección de Railway). Con cookies de cuenta yt-dlp cambia sus clientes por defecto (`web_embedded`, `tv_downgraded`, `web`) y el PO token sigue ayudando con el cliente `web`.
+
 ## Desarrollo local
 
 Todo se ejecuta desde la carpeta raíz (`convert`), donde está `docker-compose.yml`.
@@ -175,6 +219,8 @@ Los valores por defecto de esta tabla son los del código (`src/config/env.ts`);
 | `FFMPEG_PATH` | `ffmpeg` | Ruta de ffmpeg. La imagen usa `/usr/local/bin/ffmpeg`. |
 | `YTDLP_ARGS_PREFIX` | `[]` | Array JSON que se antepone a los argumentos de yt-dlp. Solo para tests. |
 | `FFMPEG_ARGS_PREFIX` | `[]` | Igual, para ffmpeg. Solo para tests. |
+| `POT_PROVIDER_URL` | vacío | URL del servidor del PO token provider (`http://` o `https://`), p. ej. `http://pot:4416`. Vacío = desactivado. En compose vale `http://pot:4416` salvo que pongas otra cosa en el `.env` de la raíz. |
+| `YTDLP_PROXY` | vacío | Proxy de salida para yt-dlp y para el audio de la escucha (`http://`, `https://` o `socks5://`). Vacío = sin proxy. |
 | `YTDLP_COOKIES_FILE` | vacío | Ruta a un `cookies.txt` (formato Netscape). Recomendado en producción con Docker secrets. |
 | `YOUTUBE_COOKIES_JSON` | vacío | Cookies como variable de entorno. En producción arranca igual, pero registra el aviso `cookies_via_env`. |
 | `AUDIO_HLS_FALLBACK` | `true` | Si un video no tiene audio por https, usa el audio HLS. |
@@ -270,7 +316,7 @@ Los valores por defecto de esta tabla son los del código (`src/config/env.ts`);
 ### Dónde se configuran
 
 - Railway: en las variables del servicio de la API.
-- Docker Compose (`api`): el servicio solo recibe las variables de su bloque `environment` en `../docker-compose.yml` (`REDIS_URL`, `IP_HASH_SALT`, `CORS_ORIGINS`, `TRUST_PROXY`, `TURNSTILE_SECRET`, `CONVERT_CONCURRENCY`, `YOUTUBE_COOKIES_JSON`); el resto usa los defaults. Para cambiar otra, agrégala a ese bloque y ponle el valor en el `.env` de la raíz:
+- Docker Compose (`api`): el servicio solo recibe las variables de su bloque `environment` en `../docker-compose.yml` (`REDIS_URL`, `IP_HASH_SALT`, `CORS_ORIGINS`, `TRUST_PROXY`, `TURNSTILE_SECRET`, `CONVERT_CONCURRENCY`, `POT_PROVIDER_URL`, `YTDLP_PROXY`, `YOUTUBE_COOKIES_JSON`); el resto usa los defaults. Para cambiar otra, agrégala a ese bloque y ponle el valor en el `.env` de la raíz:
 
   ```yaml
   environment:
@@ -294,6 +340,8 @@ La API valida la configuración al iniciar. Si algo no cuadra, registra un log `
 - `CORS_ORIGINS` con al menos un origen.
 - `PREVIEW_CHUNK_BYTES` entre 1048576 y 10485760, y `PREVIEW_IDLE_TIMEOUT_MS` de al menos 5000.
 - `CLIENT_IP_HEADER` vacío o un nombre de cabecera válido (letras, números y guiones, hasta 64; se pasa a minúsculas).
+- `POT_PROVIDER_URL` vacío o una URL `http:`/`https:` sin usuario, query, `,` ni `;` (yt-dlp usa esos dos como separadores en `--extractor-args`).
+- `YTDLP_PROXY` vacío o una URL `http:`, `https:` o `socks5:` con host y sin ruta ni query.
 - Si hay `YTDLP_COOKIES_FILE`, que el archivo se pueda leer.
 
 ### `/api/config`
@@ -309,13 +357,14 @@ cp .env.example .env          # rellena REDIS_PASSWORD, IP_HASH_SALT y NEXT_PUBL
 docker compose up -d --build --wait
 ```
 
-- Servicios: `redis` (sin puertos publicados, red interna, sin persistencia y con comandos peligrosos deshabilitados), `api` (puerto 4000, sistema de archivos de solo lectura, `/tmp` en tmpfs de 128 MB, sin capabilities) y `web` (puerto 3000).
+- Servicios: `redis` (sin puertos publicados, red interna, sin persistencia y con comandos peligrosos deshabilitados), `pot` (PO token provider, sin puertos publicados, en la red interna y con salida a internet por la red `egress`; escucha en IPv4 e IPv6 con `--host 0.0.0.0,::`), `api` (puerto 4000, sistema de archivos de solo lectura, `/tmp` en tmpfs de 128 MB, sin capabilities; espera a que `pot` esté sano) y `web` (puerto 3000).
+- Para levantar la API sin PO token, pon `POT_PROVIDER_URL=` (vacío) en el `.env` de la raíz.
 - Ponlo detrás de un proxy con TLS y HTTP/2 (Cloudflare, Caddy). HTTP/2 importa porque el navegador abre un SSE y una descarga por job, y en HTTP/1.1 solo hay 6 conexiones por origen.
 - Con proxy define `TRUST_PROXY` (normalmente `1`). Si no, todos los usuarios comparten la IP del proxy en el rate limit. Si se pone de más, cualquiera puede falsear `X-Forwarded-For`.
 - Con Cloudflare (nube naranja) delante de Railway: `TRUST_PROXY=1` y `CLIENT_IP_HEADER=cf-connecting-ip`. Sin Cloudflare, solo `TRUST_PROXY=1`. Quien entre directo al dominio de Railway, saltándose Cloudflare, puede falsear esa cabecera; se acepta porque estos topes frenan abusos, no controlan el acceso.
 - En la primera petición la API registra `proxy_hops_seen` (cuántas entradas trae `X-Forwarded-For` y si llega `CF-Connecting-IP`, sin IPs). Si `CLIENT_IP_HEADER` está puesto y una petición no la trae, avisa con `client_ip_header_missing`; en producción sin `TRUST_PROXY` ni `CLIENT_IP_HEADER` avisa con `trust_proxy_disabled`.
 - `docker compose stop` da 40 s: la API deja de aceptar descargas, cierra los SSE con `server-restart` y termina los procesos en curso dentro de `SHUTDOWN_GRACE_MS`.
-- Para actualizar yt-dlp cambia `YTDLP_VERSION` y los dos `YTDLP_SHA256_*` del `Dockerfile` (los valores están en `SHA2-256SUMS` del release) y reconstruye.
+- Para actualizar yt-dlp cambia `YTDLP_VERSION` y los dos `YTDLP_SHA256_*` del `Dockerfile` (los valores están en `SHA2-256SUMS` del release) y reconstruye. El plugin del PO token pide yt-dlp 2025.05.22 o posterior.
 
 ### Cookies con Docker secrets
 
@@ -332,11 +381,26 @@ Las cookies se escriben en un archivo temporal `0600` por cada proceso de yt-dlp
 
 ### Servicios
 
-Crea tres servicios en el mismo proyecto y la misma región:
+Crea cuatro servicios en el mismo proyecto y la misma región:
 
 1. Redis, desde la plantilla de Railway.
-2. API, desde este repositorio. Railway detecta el `Dockerfile` y lo usa.
-3. Web, desde el repositorio `setube` (ver su README).
+2. `pot`, el PO token provider (ver abajo).
+3. API, desde este repositorio. Railway detecta el `Dockerfile` y lo usa.
+4. Web, desde el repositorio `setube` (ver su README).
+
+### Servicio `pot` (PO token)
+
+1. New → Docker Image → `brainicism/bgutil-ytdlp-pot-provider:2.0.2-node`. Usa siempre una etiqueta fija, la misma versión que `BGUTIL_POT_VERSION` del `Dockerfile`, nunca `latest`.
+2. Llama al servicio `pot` (la variable de la API depende de ese nombre).
+3. En Settings → Networking no generes dominio público: solo se usa por la red privada y el servidor no tiene autenticación.
+4. En Settings → Deploy → Custom Start Command pon:
+
+   ```sh
+   /usr/local/bin/node /app/build/main.js --host 0.0.0.0,::
+   ```
+
+   La imagen arranca con `--host 0.0.0.0`, que solo escucha en IPv4. La red privada de Railway usa IPv6 (en entornos creados antes del 16 de octubre de 2025, solo IPv6), así que sin ese comando la API no lo encuentra. El servidor no tiene ninguna variable para esto: se hace con `--host`, que acepta varias direcciones separadas por coma y abre un socket para cada una. Con un comando propio Railway reemplaza el `ENTRYPOINT` de la imagen, por eso va la ruta completa de node. En los logs debe aparecer `Started POT server (v2.0.2) on address 0.0.0.0:4416, [::]:4416`.
+5. No necesita variables ni volumen. El puerto es 4416.
 
 ### Contraseña de Redis
 
@@ -363,7 +427,10 @@ openssl rand -hex 32
 | `CONVERT_CONCURRENCY` | los vCPU de tu plan |
 | `CONVERSION_WALL_TIMEOUT_MS` | `840000` |
 | `MAX_ITEMS_PER_JOB` | `20` (recomendado) |
+| `POT_PROVIDER_URL` | `http://${{pot.RAILWAY_PRIVATE_DOMAIN}}:4416` |
+| `YTDLP_PROXY` | vacío, o la URL de tu proxy si lo usas |
 
+- `POT_PROVIDER_URL` va con `http://`: el tráfico de la red privada ya va cifrado. Tras desplegar, el log de la API debe mostrar `pot_provider_ok`; si sale `pot_provider_unreachable`, revisa el nombre del servicio y el Custom Start Command de `pot`.
 - `?family=0` es obligatorio: la red privada de Railway es IPv6 y ioredis por defecto solo resuelve IPv4. Sin eso la API no encuentra Redis.
 - `CONVERSION_WALL_TIMEOUT_MS=840000` (14 min) porque Railway corta las peticiones HTTP a los 15 minutos. Así la API corta el item con un error claro antes de que lo haga el proxy.
 - Si `CONVERT_CONCURRENCY` es menor que 3, baja también `ZIP_PARALLEL_AUDIO` a ese valor o la API no arranca.
@@ -382,6 +449,8 @@ CLIENT_IP_HEADER="cf-connecting-ip"
 CONVERT_CONCURRENCY="<vCPU de tu plan>"
 CONVERSION_WALL_TIMEOUT_MS="840000"
 MAX_ITEMS_PER_JOB="20"
+POT_PROVIDER_URL="http://${{pot.RAILWAY_PRIVATE_DOMAIN}}:4416"
+YTDLP_PROXY=""
 PREVIEW_ENABLED="true"
 PREVIEW_MAX_STREAMS_PER_IP="4"
 PREVIEW_MAX_STREAMS_PER_INSTANCE="100"
@@ -414,7 +483,7 @@ Railway no tiene Docker secrets, así que usa `YOUTUBE_COOKIES_JSON` como variab
 
 ### Consideraciones
 
-- Railway sale a internet con IPs de datacenter y YouTube puede responder «Sign in to confirm you're not a bot» (`UPSTREAM_BLOCKED`). Las cookies y mantener yt-dlp al día lo mitigan, pero no lo eliminan.
+- Railway sale a internet con IPs de datacenter y YouTube puede responder «Sign in to confirm you're not a bot» (`UPSTREAM_BLOCKED`). El servicio `pot`, las cookies de una cuenta secundaria, un proxy (`YTDLP_PROXY`) y mantener yt-dlp al día lo mitigan, pero no lo eliminan (ver «Bloqueo de YouTube»).
 - El límite de 15 minutos por petición afecta sobre todo a los ZIP grandes. Bajar `MAX_ITEMS_PER_JOB` ayuda a que entren en ese tiempo.
 - Cada descarga sale completa por la red y Railway cobra el tráfico de salida. El audio que se escucha en la web también pasa por la API y cuenta como tráfico de salida.
 - El corte de 15 minutos también afecta a la escucha, pero ahí no se nota: el navegador vuelve a pedir el audio con `Range` desde donde iba.
@@ -424,6 +493,7 @@ Railway no tiene Docker secrets, así que usa `YOUTUBE_COOKIES_JSON` como variab
 
 - La API es pública y no tiene autenticación. La protegen el rate limit por IP, los topes de descargas por IP e instancia, la cola global y los límites de items y duración. Turnstile es opcional (`TURNSTILE_SECRET` + `NEXT_PUBLIC_TURNSTILE_SITE_KEY`).
 - Las IPs nunca se guardan en claro: se usa un hash con `IP_HASH_SALT`.
+- El servidor `pot` no tiene autenticación y solo debe ser accesible desde la red privada (compose sin puertos publicados, Railway sin dominio público).
 - No hay caché de archivos: cada descarga vuelve a convertir.
 - Si la conexión se corta, la descarga de una conversión empieza de cero (las descargas de `/file` y `/archive` no admiten `Range`; la ruta de audio sí).
 - Las cookies solo entran por archivo secreto o variable de entorno, nunca en el código ni en la imagen.

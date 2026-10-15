@@ -7,6 +7,7 @@ import type { Config } from './config/env.js';
 import { Lifecycle, registerLifecycle } from './lib/lifecycle.js';
 import { loggerOptions } from './lib/logger.js';
 import { configureProc } from './lib/media/proc.js';
+import { proxiedFetch, proxyDispatcher } from './lib/http/proxy-fetch.js';
 import type { PubSub } from './lib/pubsub.js';
 import { createMetadata, type MetadataService } from './lib/youtube/metadata.js';
 import { headerIp } from './lib/ip.js';
@@ -36,6 +37,7 @@ export interface AppDeps {
   redis?: Redis;
   subscriber?: Redis;
   fetch?: typeof fetch;
+  upstreamFetch?: typeof fetch;
   logger?: false | { stream: NodeJS.WritableStream };
   lifecycle?: Lifecycle;
   youtube?: Partial<YoutubeServices>;
@@ -62,7 +64,7 @@ declare module 'fastify' {
     pubsub: PubSub;
     lifecycle: Lifecycle;
     yt: YoutubeServices;
-    deps: { fetch: typeof fetch; streams?: StreamTuning; preview?: PreviewTuning };
+    deps: { fetch: typeof fetch; upstreamFetch: typeof fetch; streams?: StreamTuning; preview?: PreviewTuning };
     semaphore: Semaphore;
   }
 }
@@ -89,6 +91,7 @@ export async function buildApp({ config, deps = {} }: { config: Config; deps?: A
   configureProc({
     ytdlpPath: config.ytdlpPath,
     ytdlpArgsPrefix: config.ytdlpArgsPrefix,
+    ytdlpNet: { potProviderUrl: config.potProviderUrl, proxy: config.ytdlpProxy },
     ffmpegPath: config.ffmpegPath,
     ffmpegArgsPrefix: config.ffmpegArgsPrefix,
     log: app.log,
@@ -97,7 +100,17 @@ export async function buildApp({ config, deps = {} }: { config: Config; deps?: A
   const lifecycle = deps.lifecycle ?? new Lifecycle();
   app.decorate('config', config);
   app.decorate('lifecycle', lifecycle);
-  app.decorate('deps', { fetch: deps.fetch ?? globalThis.fetch, streams: deps.streams, preview: deps.preview });
+  const fetchImpl = deps.fetch ?? globalThis.fetch;
+  // Las URLs de googlevideo van atadas a la IP que las pidió: si yt-dlp sale por proxy, el audio también
+  let upstreamFetch = deps.upstreamFetch ?? fetchImpl;
+  if (!deps.upstreamFetch && config.ytdlpProxy) {
+    const dispatcher = proxyDispatcher(config.ytdlpProxy);
+    upstreamFetch = proxiedFetch(dispatcher);
+    app.addHook('onClose', async () => {
+      await dispatcher.close().catch(() => undefined);
+    });
+  }
+  app.decorate('deps', { fetch: fetchImpl, upstreamFetch, streams: deps.streams, preview: deps.preview });
 
   let hopsSeen = false;
   const ipWarn = throttledWarn(app.log);

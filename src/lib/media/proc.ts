@@ -5,6 +5,7 @@ import path from 'node:path';
 import { Transform, type Readable, type TransformCallback } from 'node:stream';
 import { AppError, type ErrorCode } from '../errors.js';
 import { cookies } from './cookies.js';
+import { scrubCredentials, ytdlpNetArgs, type YtdlpNet } from './net.js';
 
 export const SETUBE_TMP = path.join(os.tmpdir(), 'setube');
 
@@ -25,6 +26,7 @@ export interface ProcLogger {
 interface ProcSettings {
   ytdlpPath: string;
   ytdlpArgsPrefix: string[];
+  ytdlpNet: YtdlpNet;
   ffmpegPath: string;
   ffmpegArgsPrefix: string[];
   log: ProcLogger | undefined;
@@ -33,6 +35,7 @@ interface ProcSettings {
 const settings: ProcSettings = {
   ytdlpPath: 'yt-dlp',
   ytdlpArgsPrefix: [],
+  ytdlpNet: { potProviderUrl: null, proxy: null },
   ffmpegPath: 'ffmpeg',
   ffmpegArgsPrefix: [],
   log: undefined,
@@ -40,6 +43,11 @@ const settings: ProcSettings = {
 
 export function configureProc(s: Partial<ProcSettings>): void {
   Object.assign(settings, s);
+}
+
+// Proxy y PO token van en todas las invocaciones, antes de las opciones propias y del `--`
+export function ytdlpArgv(args: (cookiesPath: string | null) => string[], cookiesPath: string | null): string[] {
+  return [...settings.ytdlpArgsPrefix, ...ytdlpNetArgs(settings.ytdlpNet), ...args(cookiesPath)];
 }
 
 export interface SpawnOpts {
@@ -81,7 +89,7 @@ export async function spawnYtdlp(
   try {
     workDir = await fs.mkdtemp(path.join(SETUBE_TMP, 'w-'));
     const cookiesPath = cookies.configured ? await cookies.materialize(workDir) : null;
-    child = spawn(settings.ytdlpPath, [...settings.ytdlpArgsPrefix, ...args(cookiesPath)], {
+    child = spawn(settings.ytdlpPath, ytdlpArgv(args, cookiesPath), {
       shell: false,
       cwd: workDir,
       stdio: opts.stdio,
@@ -124,7 +132,7 @@ export class RingBuffer {
   private readonly buf: string[] = [];
   constructor(private readonly size = 50) {}
   push(line: string): void {
-    this.buf.push(line);
+    this.buf.push(scrubCredentials(line));
     if (this.buf.length > this.size) this.buf.shift();
   }
   lines(): string[] {

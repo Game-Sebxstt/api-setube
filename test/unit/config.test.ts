@@ -221,18 +221,68 @@ describe('variables de escucha en streaming', () => {
   });
 });
 
+describe('PO token provider y proxy', () => {
+  it('vacíos por defecto', () => {
+    const c = loadConfig(base());
+    expect(c.potProviderUrl).toBeNull();
+    expect(c.ytdlpProxy).toBeNull();
+  });
+
+  it('acepta URLs válidas y quita la barra final del provider', () => {
+    const c = loadConfig(base({ POT_PROVIDER_URL: 'http://pot:4416/', YTDLP_PROXY: 'http://u:p@proxy.example:8080' }));
+    expect(c.potProviderUrl).toBe('http://pot:4416');
+    expect(c.ytdlpProxy).toBe('http://u:p@proxy.example:8080');
+    expect(loadConfig(base({ POT_PROVIDER_URL: 'https://pot.railway.internal:4416' })).potProviderUrl).toBe('https://pot.railway.internal:4416');
+    expect(loadConfig(base({ POT_PROVIDER_URL: 'http://[fd12::1]:4416' })).potProviderUrl).toBe('http://[fd12::1]:4416');
+    expect(loadConfig(base({ YTDLP_PROXY: 'https://proxy.example:443' })).ytdlpProxy).toBe('https://proxy.example:443');
+    expect(loadConfig(base({ YTDLP_PROXY: 'socks5://u:p@10.0.0.1:1080' })).ytdlpProxy).toBe('socks5://u:p@10.0.0.1:1080');
+  });
+
+  it.each([
+    'pot:4416',
+    'ftp://pot:4416',
+    'http://u:p@pot:4416',
+    'http://pot:4416/?a=1',
+    'http://pot:4416/a;b',
+    'http://pot:4416/a,b',
+  ])('POT_PROVIDER_URL inválida: %s', (v) => {
+    expect(keysOf(() => loadConfig(base({ POT_PROVIDER_URL: v })))).toEqual(['POT_PROVIDER_URL']);
+  });
+
+  it.each([
+    'proxy.example:8080',
+    'socks4://proxy.example:1080',
+    'ftp://proxy.example',
+    'http://proxy.example:8080/ruta',
+    'http://proxy.example:8080/?x=1',
+  ])('YTDLP_PROXY inválido: %s', (v) => {
+    expect(keysOf(() => loadConfig(base({ YTDLP_PROXY: v })))).toEqual(['YTDLP_PROXY']);
+  });
+
+  it('el error de validación no incluye el valor del proxy', () => {
+    try {
+      loadConfig(base({ YTDLP_PROXY: 'socks4://usuario:clave-secreta@proxy.example:1080' }));
+      throw new Error('no falló');
+    } catch (e) {
+      expect(e).toBeInstanceOf(ConfigError);
+      expect(JSON.stringify({ m: (e as Error).message, k: (e as ConfigError).keys })).not.toContain('clave-secreta');
+    }
+  });
+});
+
 describe('redact del logger', () => {
-  it('censura config.redisUrl, req.headers.cookie y body.turnstileToken', async () => {
+  it('censura config.redisUrl, config.ytdlpProxy, req.headers.cookie y body.turnstileToken', async () => {
     const { lines, stream } = memStream();
     const app = Fastify({ logger: loggerOptions({ logLevel: 'info', isProd: true }, stream) });
     await app.ready();
-    app.log.info({ config: { redisUrl: `redis://:${HEX}@redis:6379/0`, ipHashSalt: 'sal-secreta' } }, 'prueba');
+    app.log.info({ config: { redisUrl: `redis://:${HEX}@redis:6379/0`, ipHashSalt: 'sal-secreta', ytdlpProxy: 'http://usuario:proxy-secreto@proxy.example:8080' } }, 'prueba');
     app.log.info({ req: { headers: { cookie: 'SID=cookie-secreta' } }, body: { turnstileToken: 'token-secreto' } }, 'prueba2');
     await app.close();
     const out = lines.join('');
     expect(out).toContain('[redacted]');
     expect(out).not.toContain(HEX);
     expect(out).not.toContain('sal-secreta');
+    expect(out).not.toContain('proxy-secreto');
     expect(out).not.toContain('cookie-secreta');
     expect(out).not.toContain('token-secreto');
   });

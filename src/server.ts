@@ -1,7 +1,9 @@
 import closeWithGrace from 'close-with-grace';
 import { buildApp, proxyStartupWarnings } from './app.js';
 import { ConfigError, loadConfig, type Config } from './config/env.js';
+import { redactUrl } from './lib/media/net.js';
 import { binaryVersion, configureProc, prepareTmp, SETUBE_TMP } from './lib/media/proc.js';
+import { pingPotProvider } from './lib/youtube/pot.js';
 
 const early = {
   write(level: number, obj: object, msg: string) {
@@ -35,6 +37,7 @@ async function main(): Promise<void> {
   configureProc({
     ytdlpPath: config.ytdlpPath,
     ytdlpArgsPrefix: config.ytdlpArgsPrefix,
+    ytdlpNet: { potProviderUrl: config.potProviderUrl, proxy: config.ytdlpProxy },
     ffmpegPath: config.ffmpegPath,
     ffmpegArgsPrefix: config.ffmpegArgsPrefix,
   });
@@ -63,10 +66,20 @@ async function main(): Promise<void> {
       nodeEnv: config.nodeEnv,
       convertConcurrency: config.convertConcurrency,
       cookiesConfigured: config.cookiesConfigured,
+      potProvider: redactUrl(config.potProviderUrl),
+      ytdlpProxy: redactUrl(config.ytdlpProxy),
       ytdlpVersion,
     },
     'setube_api_started',
   );
+
+  if (config.potProviderUrl) {
+    const potProvider = redactUrl(config.potProviderUrl);
+    void pingPotProvider(config.potProviderUrl).then((r) => {
+      if (r.ok) app.log.info({ potProvider, version: r.version }, 'pot_provider_ok');
+      else app.log.warn({ potProvider, reason: r.reason, status: r.status }, 'pot_provider_unreachable');
+    });
+  }
 }
 
 main().catch((e: unknown) => {

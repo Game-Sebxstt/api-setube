@@ -11,6 +11,7 @@ export const REDACT_PATHS = [
   'config.turnstileSecret',
   'config.youtubeCookiesJson',
   'config.cookiesNetscape',
+  'config.ytdlpProxy',
 ];
 
 export function redactQuery(url: string): string {

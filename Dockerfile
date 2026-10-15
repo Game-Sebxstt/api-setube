@@ -11,6 +11,15 @@ RUN set -eu; case "$TARGETARCH" in amd64) A=yt-dlp_linux.zip; S=$YTDLP_SHA256_AM
     curl -fsSL -o /tmp/y.zip "https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/${A}"; \
     echo "$S  /tmp/y.zip" | sha256sum -c -; mkdir -p /opt/yt-dlp && unzip -q /tmp/y.zip -d /opt/yt-dlp; \
     BIN=$(find /opt/yt-dlp -maxdepth 2 -type f -name 'yt-dlp_linux*' | head -1); chmod 0755 "$BIN"; ln -s "$BIN" /opt/yt-dlp/yt-dlp
+# Plugin del PO token provider (cliente HTTP de bgutil). El binario standalone carga los zip de
+# yt-dlp-plugins/ junto al ejecutable, sin depender de HOME. Debe coincidir con la versión del servicio pot.
+ARG BGUTIL_POT_VERSION=2.0.2
+ARG BGUTIL_POT_SHA256=a26b980bf6d8e8400d8f21445daa4d8381bf6183d20f0be309391f86b31e27ef
+RUN set -eu; mkdir -p /opt/yt-dlp/yt-dlp-plugins; \
+    curl -fsSL -o /opt/yt-dlp/yt-dlp-plugins/bgutil-ytdlp-pot-provider.zip \
+      "https://github.com/Brainicism/bgutil-ytdlp-pot-provider/releases/download/${BGUTIL_POT_VERSION}/bgutil-ytdlp-pot-provider.zip"; \
+    echo "$BGUTIL_POT_SHA256  /opt/yt-dlp/yt-dlp-plugins/bgutil-ytdlp-pot-provider.zip" | sha256sum -c -; \
+    chmod 0644 /opt/yt-dlp/yt-dlp-plugins/bgutil-ytdlp-pot-provider.zip
 
 FROM node:24.21.0-bookworm-slim AS deps
 WORKDIR /app

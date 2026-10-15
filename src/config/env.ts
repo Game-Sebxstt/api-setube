@@ -23,6 +23,8 @@ export const EnvSchema = Type.Object({
   FFMPEG_PATH: Str('ffmpeg'),
   YTDLP_ARGS_PREFIX: Str('[]'),
   FFMPEG_ARGS_PREFIX: Str('[]'),
+  POT_PROVIDER_URL: Str(''),
+  YTDLP_PROXY: Str(''),
   YTDLP_COOKIES_FILE: Str(''),
   YOUTUBE_COOKIES_JSON: Str(''),
   AUDIO_HLS_FALLBACK: Bool(true),
@@ -86,6 +88,8 @@ export interface Config {
   ffmpegPath: string;
   ytdlpArgsPrefix: string[];
   ffmpegArgsPrefix: string[];
+  potProviderUrl: string | null;
+  ytdlpProxy: string | null;
   cookiesFile: string | null;
   cookiesConfigured: boolean;
   audioHlsFallback: boolean;
@@ -168,6 +172,35 @@ function parseTrustProxy(raw: string): TrustProxy | null {
   return null;
 }
 
+// null = vacío, false = inválido. Sin `,` ni `;`: yt-dlp los usa como separadores en --extractor-args
+function parsePotUrl(raw: string): string | null | false {
+  const s = raw.trim();
+  if (s === '') return null;
+  let u: URL;
+  try {
+    u = new URL(s);
+  } catch {
+    return false;
+  }
+  if ((u.protocol !== 'http:' && u.protocol !== 'https:') || !u.hostname || u.username || u.password) return false;
+  if (/[,;\s]/.test(s) || u.search || u.hash) return false;
+  return s.replace(/\/+$/, '');
+}
+
+function parseProxyUrl(raw: string): string | null | false {
+  const s = raw.trim();
+  if (s === '') return null;
+  let u: URL;
+  try {
+    u = new URL(s);
+  } catch {
+    return false;
+  }
+  if (!['http:', 'https:', 'socks5:'].includes(u.protocol) || !u.hostname || /\s/.test(s)) return false;
+  if ((u.pathname !== '' && u.pathname !== '/') || u.search || u.hash) return false;
+  return s;
+}
+
 function redisPasswordOk(url: string): boolean {
   let u: URL;
   try {
@@ -215,6 +248,10 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env, log?: Cookie
   if (env.PREVIEW_IDLE_TIMEOUT_MS < 5000) bad.push('PREVIEW_IDLE_TIMEOUT_MS');
   const clientIpHeader = env.CLIENT_IP_HEADER.trim().toLowerCase();
   if (clientIpHeader !== '' && !/^[a-z0-9-]{1,64}$/.test(clientIpHeader)) bad.push('CLIENT_IP_HEADER');
+  const potProviderUrl = parsePotUrl(env.POT_PROVIDER_URL);
+  if (potProviderUrl === false) bad.push('POT_PROVIDER_URL');
+  const ytdlpProxy = parseProxyUrl(env.YTDLP_PROXY);
+  if (ytdlpProxy === false) bad.push('YTDLP_PROXY');
   if (bad.length) throw new ConfigError(bad);
 
   const cookiesFile = env.YTDLP_COOKIES_FILE || null;
@@ -241,6 +278,8 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env, log?: Cookie
     ffmpegPath: env.FFMPEG_PATH,
     ytdlpArgsPrefix: ytdlpArgsPrefix as string[],
     ffmpegArgsPrefix: ffmpegArgsPrefix as string[],
+    potProviderUrl: potProviderUrl || null,
+    ytdlpProxy: ytdlpProxy || null,
     cookiesFile,
     cookiesConfigured: cookies.configured,
     audioHlsFallback: env.AUDIO_HLS_FALLBACK,

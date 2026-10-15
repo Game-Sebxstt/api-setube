@@ -184,7 +184,7 @@ const previewRoute: FastifyPluginAsyncTypebox = async (app) => {
 
         const s = createSession(
           {
-            fetch: app.deps.fetch,
+            fetch: app.deps.upstreamFetch,
             chunkBytes: config.previewChunkBytes,
             headersTimeoutMs: tuning.headersTimeoutMs,
             metadata: app.yt.metadata,
