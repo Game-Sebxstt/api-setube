@@ -2,6 +2,7 @@
   "name": "api-setube",
   "version": "2.0.0",
   "private": true,
+  "license": "GPL-3.0-only",
   "description": "Setube v2: API de conversión de YouTube en streaming (Fastify 5)",
   "type": "module",
   "scripts": {
