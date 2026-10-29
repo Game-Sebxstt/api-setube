@@ -27,6 +27,7 @@ export const EnvSchema = Type.Object({
   YTDLP_PROXY: Str(''),
   YTDLP_COOKIES_FILE: Str(''),
   YOUTUBE_COOKIES_JSON: Str(''),
+  YTDLP_COOKIES_DB: Str(''),
   AUDIO_HLS_FALLBACK: Bool(true),
   YTDLP_INFO_JSON: Bool(true),
   MAX_ITEMS_PER_JOB: Int(50, 1),
@@ -91,6 +92,7 @@ export interface Config {
   potProviderUrl: string | null;
   ytdlpProxy: string | null;
   cookiesFile: string | null;
+  cookiesDb: string | null;
   cookiesConfigured: boolean;
   audioHlsFallback: boolean;
   ytdlpInfoJson: boolean;
@@ -255,8 +257,9 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env, log?: Cookie
   if (bad.length) throw new ConfigError(bad);
 
   const cookiesFile = env.YTDLP_COOKIES_FILE || null;
+  const cookiesDb = env.YTDLP_COOKIES_DB.trim() || null;
   try {
-    cookies.load({ file: cookiesFile, json: env.YOUTUBE_COOKIES_JSON || null, isProd, env: source, log });
+    cookies.load({ file: cookiesFile, json: env.YOUTUBE_COOKIES_JSON || null, db: cookiesDb, isProd, env: source, log });
   } catch (e) {
     if (e instanceof CookiesError) {
       throw new ConfigError([e.key], e.path ? { path: e.path, code: e.code } : { code: e.code });
@@ -281,6 +284,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env, log?: Cookie
     potProviderUrl: potProviderUrl || null,
     ytdlpProxy: ytdlpProxy || null,
     cookiesFile,
+    cookiesDb,
     cookiesConfigured: cookies.configured,
     audioHlsFallback: env.AUDIO_HLS_FALLBACK,
     ytdlpInfoJson: env.YTDLP_INFO_JSON,

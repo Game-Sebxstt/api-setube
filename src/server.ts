@@ -1,6 +1,7 @@
 import closeWithGrace from 'close-with-grace';
 import { buildApp, proxyStartupWarnings } from './app.js';
 import { ConfigError, loadConfig, type Config } from './config/env.js';
+import { cookies } from './lib/media/cookies.js';
 import { redactUrl } from './lib/media/net.js';
 import { binaryVersion, configureProc, prepareTmp, SETUBE_TMP } from './lib/media/proc.js';
 import { pingPotProvider } from './lib/youtube/pot.js';
@@ -51,6 +52,7 @@ async function main(): Promise<void> {
   }
 
   const app = await buildApp({ config });
+  cookies.setLogger(app.log);
   for (const w of proxyStartupWarnings(config)) app.log.warn({}, w);
 
   closeWithGrace({ delay: config.shutdownGraceMs, logger: app.log }, async ({ err, signal }) => {
@@ -66,6 +68,7 @@ async function main(): Promise<void> {
       nodeEnv: config.nodeEnv,
       convertConcurrency: config.convertConcurrency,
       cookiesConfigured: config.cookiesConfigured,
+      cookies: cookies.status(),
       potProvider: redactUrl(config.potProviderUrl),
       ytdlpProxy: redactUrl(config.ytdlpProxy),
       ytdlpVersion,

@@ -133,7 +133,7 @@ El proxy nunca se registra completo: en los logs aparece como `http://[redacted]
 
 ### Cookies de una cuenta secundaria
 
-Las cookies de una sesión iniciada son lo más efectivo contra «Sign in to confirm», pero YouTube puede limitar o banear la cuenta. Usa siempre una cuenta secundaria, exporta las cookies de una sesión nueva (formato Netscape) y no abras esa sesión en el navegador mientras la usa la API. Se configuran con `YTDLP_COOKIES_FILE` o `YOUTUBE_COOKIES_JSON` (ver «Cookies con Docker secrets» y la sección de Railway). Con cookies de cuenta yt-dlp cambia sus clientes por defecto (`web_embedded`, `tv_downgraded`, `web`) y el PO token sigue ayudando con el cliente `web`.
+Las cookies de una sesión iniciada son lo más efectivo contra «Sign in to confirm», pero YouTube puede limitar o banear la cuenta. Usa siempre una cuenta secundaria, exporta las cookies de una sesión nueva (formato Netscape) y no abras esa sesión en el navegador mientras la usa la API. Se configuran con `YTDLP_COOKIES_FILE`, `YOUTUBE_COOKIES_JSON` o `YTDLP_COOKIES_DB` (ver «Cookies con Docker secrets», «Cookies persistentes desde la base SQLite del navegador» y la sección de Railway). Con cookies de cuenta yt-dlp cambia sus clientes por defecto (`web_embedded`, `tv_downgraded`, `web`) y el PO token sigue ayudando con el cliente `web`.
 
 ## Desarrollo local
 
@@ -225,6 +225,7 @@ Los valores por defecto de esta tabla son los del código (`src/config/env.ts`);
 | `YTDLP_PROXY` | vacío | Proxy de salida para yt-dlp y para el audio de la escucha (`http://`, `https://` o `socks5://`). Vacío = sin proxy. |
 | `YTDLP_COOKIES_FILE` | vacío | Ruta a un `cookies.txt` (formato Netscape). Recomendado en producción con Docker secrets. |
 | `YOUTUBE_COOKIES_JSON` | vacío | Cookies como variable de entorno. En producción arranca igual, pero registra el aviso `cookies_via_env`. |
+| `YTDLP_COOKIES_DB` | vacío | Base SQLite de cookies de un perfil con sesión de YouTube: `cookies.sqlite` de Firefox, `Cookies` de Chromium o el directorio del perfil. Se relee cuando cambia. No se puede combinar con las dos anteriores. |
 | `AUDIO_HLS_FALLBACK` | `true` | Si un video no tiene audio por https, usa el audio HLS. |
 | `YTDLP_INFO_JSON` | `true` | Reutiliza el info JSON cacheado al descargar para no volver a pedir la metadata a YouTube. |
 
@@ -345,6 +346,7 @@ La API valida la configuración al iniciar. Si algo no cuadra, registra un log `
 - `POT_PROVIDER_URL` vacío o una URL `http:`/`https:` sin usuario, query, `,` ni `;` (yt-dlp usa esos dos como separadores en `--extractor-args`).
 - `YTDLP_PROXY` vacío o una URL `http:`, `https:` o `socks5:` con host y sin ruta ni query.
 - Si hay `YTDLP_COOKIES_FILE`, que el archivo se pueda leer.
+- Si hay `YTDLP_COOKIES_DB`, que exista, sea una base de cookies de Firefox o Chromium legible y no venga junto a `YTDLP_COOKIES_FILE` ni `YOUTUBE_COOKIES_JSON` (código `ECONFLICT`).
 
 ### `/api/config`
 
@@ -378,6 +380,43 @@ Las cookies son opcionales y ayudan con «Sign in to confirm you're not a bot».
 4. En el host: `chmod 0444 secrets/yt_cookies.txt`, porque compose sin Swarm puede ignorar `uid`/`gid`/`mode`. Si la API no puede leer el archivo, no arranca.
 
 Las cookies se escriben en un archivo temporal `0600` por cada proceso de yt-dlp y se borran al terminar. Nunca se loguean ni se guardan en Redis.
+
+### Cookies persistentes desde la base SQLite del navegador
+
+Un `cookies.txt` exportado es una foto fija: YouTube rota las cookies de sesión (`__Secure-*PSIDTS` y compañía) y al cabo de horas o días la foto deja de valer. Con `YTDLP_COOKIES_DB` la API lee directamente la base SQLite que el navegador mantiene para un perfil con la sesión iniciada. Antes de cada proceso de yt-dlp mira si la base (o su `-wal`) cambió y, si es así, la vuelve a leer. Mientras el navegador siga usando ese perfil y renovando la sesión, la API recibe siempre las cookies vigentes.
+
+Cómo funciona:
+
+- Se copia la base y su `-wal` a un directorio temporal `0700`, se abre la copia con `node:sqlite` y se borra al terminar. No bloquea al navegador, sirve con montajes de solo lectura y no se pierden las cookies recientes que aún están en el WAL.
+- Solo pasan a yt-dlp las cookies de `youtube.com`, `google.com` y sus subdominios, sin las caducadas. El resto del perfil no sale de la base.
+- Firefox: `moz_cookies`, sin cifrar; la caducidad en milisegundos (Firefox 142+) se convierte a segundos.
+- Chromium/Chrome/Brave: valores `v10`, que es lo que usa Chromium en Linux sin llavero (`--password-store=basic`). Los `v11` (llavero de GNOME/KWallet) y las bases de Windows/macOS no se pueden descifrar en el contenedor; se cuentan y se avisa con `cookies_db_undecryptable`. Para Chromium hace falta lanzarlo con `--password-store=basic`.
+- Al arrancar, si el perfil no tiene cookies de sesión (`SAPISID`, `__Secure-3PSID`…) se avisa con `cookies_db_not_logged_in`. Si en una relectura desaparecen, con `cookies_db_logged_out`. Si una relectura falla (por ejemplo, el navegador está reescribiendo la base), se sigue con la última copia buena y se avisa con `cookies_db_refresh_failed`, como mucho una vez por minuto.
+- `setube_api_started` incluye `cookies: { source, kind, count, loggedIn }`, sin valores.
+
+Pasos con Firefox (recomendado, no necesita descifrado):
+
+1. Crea un perfil dedicado con una cuenta secundaria: `firefox -CreateProfile "setube $PWD/secrets/yt-profile"` y ábrelo con `firefox --profile secrets/yt-profile`.
+2. Inicia sesión en youtube.com y reproduce cualquier video.
+3. Monta el perfil en el servicio `api` del `docker-compose.yml` de la raíz:
+
+   ```yaml
+   services:
+     api:
+       environment:
+         YTDLP_COOKIES_DB: /run/yt-profile
+       volumes:
+         - ./secrets/yt-profile:/run/yt-profile:ro
+   ```
+
+4. Los archivos del perfil tienen que ser legibles por el usuario `node` del contenedor (uid 1000): `chmod -R a+rX secrets/yt-profile` o ajusta el propietario.
+
+Sobre cuánto dura:
+
+- Si dejas el navegador abierto con ese perfil (en el mismo host, o en un contenedor con Firefox que monte el mismo directorio), el navegador renueva la sesión y la API la sigue. Es la opción que más dura.
+- Si cierras el navegador, la base queda fija y dura lo mismo que un `cookies.txt` de esa sesión. yt-dlp no escribe de vuelta las cookies rotadas en la base.
+- Al revés que con `cookies.txt`, aquí sí está bien seguir usando el perfil en el navegador: la API lee lo que haya en cada momento. Lo que no hay que hacer es cerrar la sesión de YouTube en ese perfil.
+- `node:sqlite` es experimental en Node 24: la primera lectura imprime un `ExperimentalWarning`. Es esperado y solo pasa si `YTDLP_COOKIES_DB` está definida.
 
 ## Despliegue en Railway
 
