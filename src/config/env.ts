@@ -68,6 +68,10 @@ export const EnvSchema = Type.Object({
   PREVIEW_RATE_LIMIT_MAX: Int(60, 1),
   PREVIEW_CHUNK_BYTES: Int(10485760, 1),
   PREVIEW_IDLE_TIMEOUT_MS: Int(60000, 1),
+  SEARCH_ENABLED: Bool(true),
+  SEARCH_MAX_RESULTS: Int(12, 1),
+  SEARCH_TTL_SEC: Int(3600, 1),
+  SEARCH_RATE_LIMIT_MAX: Int(20, 1),
 });
 
 type Env = Static<typeof EnvSchema>;
@@ -134,6 +138,10 @@ export interface Config {
   previewRateLimitMax: number;
   previewChunkBytes: number;
   previewIdleTimeoutMs: number;
+  searchEnabled: boolean;
+  searchMaxResults: number;
+  searchTtlSec: number;
+  searchRateLimitMax: number;
 }
 
 export class ConfigError extends Error {
@@ -248,6 +256,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env, log?: Cookie
   if (corsOrigins.length === 0) bad.push('CORS_ORIGINS');
   if (env.PREVIEW_CHUNK_BYTES < 1048576 || env.PREVIEW_CHUNK_BYTES > 10485760) bad.push('PREVIEW_CHUNK_BYTES');
   if (env.PREVIEW_IDLE_TIMEOUT_MS < 5000) bad.push('PREVIEW_IDLE_TIMEOUT_MS');
+  if (env.SEARCH_MAX_RESULTS > 20) bad.push('SEARCH_MAX_RESULTS');
   const clientIpHeader = env.CLIENT_IP_HEADER.trim().toLowerCase();
   if (clientIpHeader !== '' && !/^[a-z0-9-]{1,64}$/.test(clientIpHeader)) bad.push('CLIENT_IP_HEADER');
   const potProviderUrl = parsePotUrl(env.POT_PROVIDER_URL);
@@ -326,5 +335,9 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env, log?: Cookie
     previewRateLimitMax: env.PREVIEW_RATE_LIMIT_MAX,
     previewChunkBytes: env.PREVIEW_CHUNK_BYTES,
     previewIdleTimeoutMs: env.PREVIEW_IDLE_TIMEOUT_MS,
+    searchEnabled: env.SEARCH_ENABLED,
+    searchMaxResults: env.SEARCH_MAX_RESULTS,
+    searchTtlSec: env.SEARCH_TTL_SEC,
+    searchRateLimitMax: env.SEARCH_RATE_LIMIT_MAX,
   };
 }

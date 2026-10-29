@@ -13,6 +13,7 @@ import { createMetadata, type MetadataService } from './lib/youtube/metadata.js'
 import { headerIp } from './lib/ip.js';
 import { createOembed, throttledWarn, type OembedService } from './lib/youtube/oembed.js';
 import { createPlaylists, type PlaylistService } from './lib/youtube/playlist.js';
+import { createSearch, type SearchService } from './lib/youtube/search.js';
 import errorsPlugin from './plugins/errors.js';
 import redisPlugin from './plugins/redis.js';
 import securityPlugin from './plugins/security.js';
@@ -25,12 +26,14 @@ import jobsRoute from './routes/jobs.js';
 import playlistsRoute from './routes/playlists.js';
 import previewRoute, { type PreviewTuning } from './routes/preview.js';
 import resolveRoute from './routes/resolve.js';
+import searchRoute from './routes/search.js';
 import videosRoute from './routes/videos.js';
 
 export interface YoutubeServices {
   oembed: OembedService;
   metadata: MetadataService;
   playlists: PlaylistService;
+  search: SearchService;
 }
 
 export interface AppDeps {
@@ -155,6 +158,15 @@ export async function buildApp({ config, deps = {} }: { config: Config; deps?: A
         ttlSec: config.playlistTtlSec,
         metaTtlSec: config.metaTtlSec,
       }),
+    search:
+      deps.youtube?.search ??
+      createSearch({
+        redis: app.redis,
+        log,
+        maxResults: config.searchMaxResults,
+        ttlSec: config.searchTtlSec,
+        metaTtlSec: config.metaTtlSec,
+      }),
   });
 
   await app.register(healthRoute);
@@ -162,6 +174,7 @@ export async function buildApp({ config, deps = {} }: { config: Config; deps?: A
   await app.register(resolveRoute);
   await app.register(videosRoute);
   await app.register(playlistsRoute);
+  await app.register(searchRoute);
   await app.register(jobsRoute);
   await app.register(eventsRoute);
   await app.register(previewRoute);

@@ -52,6 +52,7 @@ El WAV sale con cabecera RIFF de tamaño indeterminado y el M4A/MP4 como MP4 fra
 | GET | `/api/videos/:videoId` | Metadata completa de un video con yt-dlp. |
 | GET | `/api/videos/:videoId/audio` | Audio original del video para escucharlo en el navegador, con soporte de `Range` (ver «Escucha en streaming»). |
 | POST | `/api/playlists/resolve` | Lista los videos de una playlist (hasta `MAX_PLAYLIST_ITEMS`). |
+| GET | `/api/search?q=` | Busca videos en YouTube (ver «Búsqueda»). |
 | POST | `/api/jobs` | Crea un job: `{ items: [{ videoId }], format, quality?, turnstileToken? }`. Responde 201. |
 | GET | `/api/jobs/:id` | Estado actual del job y de sus items. |
 | DELETE | `/api/jobs/:id` | Cancela el job. Responde 202. |
@@ -59,7 +60,7 @@ El WAV sale con cabecera RIFF de tamaño indeterminado y el M4A/MP4 como MP4 fra
 | GET | `/api/jobs/:id/items/:itemId/file` | Descarga un item convertido, en streaming. |
 | GET | `/api/jobs/:id/archive` | Descarga todos los items válidos en un ZIP, en streaming. |
 
-Rate limits por IP (por minuto): 10 en `POST /api/jobs` y `POST /api/playlists/resolve`, 20 en las descargas, 30 en `/api/resolve`, SSE y `DELETE`, 120 en `/api/videos`, 60 en el audio (`PREVIEW_RATE_LIMIT_MAX`). El resto usa `RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW_MS`.
+Rate limits por IP (por minuto): 10 en `POST /api/jobs` y `POST /api/playlists/resolve`, 20 en las descargas, 20 en `/api/search` (`SEARCH_RATE_LIMIT_MAX`), 30 en `/api/resolve`, SSE y `DELETE`, 120 en `/api/videos`, 60 en el audio (`PREVIEW_RATE_LIMIT_MAX`). El resto usa `RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW_MS`.
 
 Todos los errores tienen la misma forma:
 
@@ -71,6 +72,26 @@ Todos los errores tienen la misma forma:
 ```
 
 `details` es opcional. Los códigos y sus estados HTTP están en `src/lib/errors.ts` (por ejemplo `INVALID_URL` 400, `LIMIT_ITEMS` 413, `RATE_LIMITED` 429, `TOO_MANY_PREVIEWS` 429, `QUEUE_FULL` 503, `UPSTREAM_BLOCKED` 503).
+
+## Búsqueda
+
+`GET /api/search?q=texto` busca videos con yt-dlp (`ytsearchN:` con `--flat-playlist`, sin descargar nada) y responde:
+
+```json
+{
+  "query": "bad bunny monaco",
+  "items": [
+    { "videoId": "_PJvpq8uOZM", "title": "BAD BUNNY - MONACO (Official Video)", "author": "Bad Bunny",
+      "duration": 440, "views": 249332660, "live": false, "thumbnail": "https://i.ytimg.com/vi/_PJvpq8uOZM/mqdefault.jpg" }
+  ]
+}
+```
+
+- `q` es obligatoria, de hasta 200 caracteres. Se quitan los caracteres de control y los espacios repetidos y se recorta a 100. El texto va después de `--` y con el prefijo `ytsearchN:` fijo, así que no puede cambiar el extractor ni pasar opciones a yt-dlp.
+- Solo devuelve videos (sin canales ni playlists), sin repetir y hasta `SEARCH_MAX_RESULTS`. `live` es `true` para directos y estrenos, que no se pueden convertir. `duration` y `views` pueden ser `null` (los directos no tienen duración).
+- Cada búsqueda se guarda en Redis `SEARCH_TTL_SEC` (1 h) con una clave que no depende de mayúsculas (`search:<sha256>`), y las búsquedas iguales simultáneas comparten el mismo proceso. También guarda `meta:lite` de cada video, como las playlists. Como mucho corren 2 búsquedas a la vez por instancia.
+- Usa las mismas cookies, PO token y proxy que el resto de llamadas a yt-dlp. Tarda entre 1 y 2 s sin caché.
+- `SEARCH_ENABLED=false` responde `SERVICE_UNAVAILABLE` (503) y `/api/config` pasa a `search: false`, así la web deja de buscar y vuelve a tratar el texto como links no válidos.
 
 ## Escucha en streaming
 
@@ -316,6 +337,15 @@ Los valores por defecto de esta tabla son los del código (`src/config/env.ts`);
 | `PREVIEW_CHUNK_BYTES` | `10485760` | Tamaño de cada tramo pedido a YouTube (10 MiB). Entre 1048576 y 10485760. |
 | `PREVIEW_IDLE_TIMEOUT_MS` | `60000` | Corta la conexión si el navegador deja de leer durante este tiempo. Mínimo 5000. |
 
+### Búsqueda
+
+| Variable | Default | Descripción |
+|---|---|---|
+| `SEARCH_ENABLED` | `true` | Activa `GET /api/search`. Con `false` responde 503 y la web no muestra la búsqueda. |
+| `SEARCH_MAX_RESULTS` | `12` | Videos por búsqueda. Máximo 20. |
+| `SEARCH_TTL_SEC` | `3600` | Caché de cada búsqueda en Redis (1 h). |
+| `SEARCH_RATE_LIMIT_MAX` | `20` | Búsquedas por minuto e IP. |
+
 ### Dónde se configuran
 
 - Railway: en las variables del servicio de la API.
@@ -342,6 +372,7 @@ La API valida la configuración al iniciar. Si algo no cuadra, registra un log `
 - `IP_HASH_SALT` presente en producción.
 - `CORS_ORIGINS` con al menos un origen.
 - `PREVIEW_CHUNK_BYTES` entre 1048576 y 10485760, y `PREVIEW_IDLE_TIMEOUT_MS` de al menos 5000.
+- `SEARCH_MAX_RESULTS` de 20 como máximo.
 - `CLIENT_IP_HEADER` vacío o un nombre de cabecera válido (letras, números y guiones, hasta 64; se pasa a minúsculas).
 - `POT_PROVIDER_URL` vacío o una URL `http:`/`https:` sin usuario, query, `,` ni `;` (yt-dlp usa esos dos como separadores en `--extractor-args`).
 - `YTDLP_PROXY` vacío o una URL `http:`, `https:` o `socks5:` con host y sin ruta ni query.
@@ -350,7 +381,7 @@ La API valida la configuración al iniciar. Si algo no cuadra, registra un log `
 
 ### `/api/config`
 
-El cliente lee los límites de `GET /api/config` (caché de 5 min), así que al cambiar las variables la web se ajusta sola. Expone `maxItemsPerJob`, `maxPlaylistItems`, `maxDurationAudioSec`, `maxDurationVideoSec`, las calidades por formato, las calidades por defecto (mp3 192, mp4 720), si Turnstile está activo y si la escucha en streaming está disponible (`preview`). Por esa caché, apagar `PREVIEW_ENABLED` puede tardar hasta 5 minutos en reflejarse en la web.
+El cliente lee los límites de `GET /api/config` (caché de 5 min), así que al cambiar las variables la web se ajusta sola. Expone `maxItemsPerJob`, `maxPlaylistItems`, `maxDurationAudioSec`, `maxDurationVideoSec`, las calidades por formato, las calidades por defecto (mp3 192, mp4 720), si Turnstile está activo, si la escucha en streaming está disponible (`preview`) y si la búsqueda está activa (`search`). Por esa caché, apagar `PREVIEW_ENABLED` puede tardar hasta 5 minutos en reflejarse en la web.
 
 ## Producción con Docker Compose
 
