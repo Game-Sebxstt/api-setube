@@ -1,7 +1,7 @@
 import type { Redis } from 'ioredis';
 import { AppError, type ErrorCode } from '../errors.js';
 import type { ByteRange } from '../http/range.js';
-import { rankPreviewFormats, type Codec, type Source } from '../youtube/formats.js';
+import { previewSourceFor, rankPreviewFormats, type Codec, type Source } from '../youtube/formats.js';
 import type { MetadataService } from '../youtube/metadata.js';
 import type { Deadline } from './deadline.js';
 import type { PreviewStats } from './types.js';
@@ -10,7 +10,8 @@ import { openChunk, UpstreamError, type Opened, type UpstreamDeps } from './upst
 type Json = Record<string, unknown>;
 
 export interface SessionDeps extends UpstreamDeps {
-  metadata: Pick<MetadataService, 'refresh' | 'readInfoJson'>;
+  // `forget` (de la caché en memoria del info JSON) obliga a releer Redis antes de decidir si hace falta refrescar
+  metadata: Pick<MetadataService, 'refresh' | 'readInfoJson'> & { forget?: (videoId: string) => void };
   redis: Redis;
   warn: (msg: string, obj?: object) => void;
   retryDelayMs?: number;
@@ -41,7 +42,20 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
 
 export const codeOf = (e: unknown): ErrorCode => (e instanceof AppError ? e.code : 'INTERNAL');
 
-export function createSession(d: SessionDeps, videoId: string, codec: Codec | undefined, sessionSignal: AbortSignal) {
+/**
+ * Qué fuente abre la sesión: el mejor audio por códec (escucha, como siempre) o un formato concreto de la lista
+ * permitida para el video en streaming (variantes avc1 ≤ maxHeight + mejor m4a).
+ */
+export type SourceSelector = Codec | undefined | { formatId: string; maxHeight: number };
+
+// null: el formato pedido no está (o ya no está) en la lista permitida
+export function selectSource(info: Json, selector: SourceSelector): Source | null {
+  if (typeof selector === 'object') return previewSourceFor(info, selector.formatId, selector.maxHeight);
+  return rankPreviewFormats(info, selector)[0] ?? null;
+}
+
+export function createSession(d: SessionDeps, videoId: string, selector: SourceSelector, sessionSignal: AbortSignal) {
+  const byFormat = typeof selector === 'object';
   const budget = { same: 2, original: 1, refresh: 1, resumes: RESUMES };
   const stats: PreviewStats = { formatId: null, refreshed: false, resumes: 0, redirects: 0, bytes: 0, retry403: 'none', urlIpFamily: null };
   const retryDelay = () => (d.retryDelayMs ?? 300) + Math.floor(Math.random() * (d.retryJitterMs ?? 500));
@@ -58,8 +72,7 @@ export function createSession(d: SessionDeps, videoId: string, codec: Codec | un
   };
 
   function pick(info: Json): Source {
-    const ranked = rankPreviewFormats(info, codec);
-    const first = ranked[0];
+    const first = selectSource(info, selector);
     if (!first) throw new AppError('FORMAT_UNAVAILABLE');
     return first;
   }
@@ -95,9 +108,10 @@ export function createSession(d: SessionDeps, videoId: string, codec: Codec | un
   }
 
   async function freshInfo(): Promise<Json> {
+    d.metadata.forget?.(videoId);
     const cached = await d.metadata.readInfoJson(videoId);
     if (cached && typeof cached.epoch === 'number' && nowSec() - cached.epoch < FRESH_INFO_SEC) {
-      const first = rankPreviewFormats(cached, codec)[0];
+      const first = selectSource(cached, selector);
       if (first && first.url !== cur().url) return cached;
     }
     return (await d.metadata.refresh(videoId)).infoJson;
@@ -123,6 +137,12 @@ export function createSession(d: SessionDeps, videoId: string, codec: Codec | un
       stats.retry403 = 'refresh';
       stats.refreshed = true;
       const info = await freshInfo();
+      // Por formato: tras refrescar tiene que seguir el mismo formatId; si desaparece, YouTube ya no lo sirve
+      if (byFormat && !selectSource(info, selector)) {
+        stats.retry403 = 'failed';
+        d.warn('preview_format_gone', { videoId, formatId: s.formatId, phase });
+        throw new AppError('UPSTREAM_FORBIDDEN');
+      }
       const next = pick(info);
       const changed = next.formatId !== s.formatId || (next.size !== null && total !== null && next.size !== total);
       if (changed && phase === 'stream') throw new AppError('UPSTREAM_FORBIDDEN');

@@ -27,6 +27,25 @@ export function audioFormat(id: string, size: number | null, over: Record<string
   };
 }
 
+// Formato adaptativo de video sin audio (avc1 en mp4), como los itag 134/135/136/137 de YouTube
+export function videoFormat(id: string, height: number, size: number | null, over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    format_id: id,
+    ext: 'mp4',
+    vcodec: 'avc1.4d401f',
+    acodec: 'none',
+    protocol: 'https',
+    width: Math.round((height * 16) / 9),
+    height,
+    fps: 30,
+    tbr: height * 3,
+    ...(size !== null ? { filesize: size } : {}),
+    url: gvUrl(id),
+    http_headers: { 'User-Agent': 'UA-test', Accept: '*/*' },
+    ...over,
+  };
+}
+
 export const infoWith = (formats: Record<string, unknown>[], epoch = nowSec()) => ({ id: 'jNQXAC9IVRw', epoch, formats });
 
 export function fakeMeta(over: Partial<Meta> = {}): Meta {

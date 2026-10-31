@@ -4,8 +4,11 @@ import {
   deriveFormats,
   estimateBytes,
   forceZip64,
+  previewAudioSource,
+  previewSourceFor,
   rankPreviewFormats,
   selectFormats,
+  videoPreviewRenditions,
   type Codec,
   type RawFormat,
 } from '../../src/lib/youtube/formats.js';
@@ -183,6 +186,105 @@ describe('rankPreviewFormats', () => {
   it('fixture real: 140 y después 139; opus 251', () => {
     expect(ids(sample as unknown as Record<string, unknown>)).toEqual(['140', '139', '251']);
     expect(ids(sample as unknown as Record<string, unknown>, 'opus')[0]).toBe('251');
+  });
+});
+
+describe('videoPreviewRenditions y previewSourceFor', () => {
+  const gv = (itag: string, q = '') => `https://rr1---sn-x.googlevideo.com/videoplayback?expire=1999999999&itag=${itag}&clen=4321${q}`;
+  const vf = (id: string, height: number, over: Record<string, unknown> = {}) => ({
+    format_id: id, vcodec: 'avc1.4d401f', acodec: 'none', ext: 'mp4', protocol: 'https', url: gv(id),
+    width: Math.round((height * 16) / 9), height, fps: 30, tbr: height * 3, filesize: 5000,
+    http_headers: { 'User-Agent': 'UA', Cookie: 'x=1' }, ...over,
+  });
+  const af = (id: string, over: Record<string, unknown> = {}) => {
+    const opus = id.startsWith('25');
+    return {
+      format_id: id, vcodec: 'none', protocol: 'https', url: gv(id), ext: opus ? 'webm' : 'm4a',
+      acodec: opus ? 'opus' : 'mp4a.40.2', abr: 128, filesize: 1000, ...over,
+    };
+  };
+  const heights = (info: Record<string, unknown>, max = 1080) => videoPreviewRenditions(info, max).map((r) => [r.height, r.formatId]);
+
+  it('una variante por altura ≤ maxHeight, ordenadas de menor a mayor, con sus datos', () => {
+    const info = { formats: [vf('137', 1080), vf('134', 360), vf('136', 720), vf('299', 2160), vf('135', 480)] };
+    expect(heights(info)).toEqual([[360, '134'], [480, '135'], [720, '136'], [1080, '137']]);
+    expect(heights(info, 720)).toEqual([[360, '134'], [480, '135'], [720, '136']]);
+    const [r] = videoPreviewRenditions(info, 360);
+    expect(r).toMatchObject({
+      formatId: '134', width: 640, height: 360, fps: 30, tbr: 1080, vcodec: 'avc1.4d401f',
+      size: 5000, contentType: 'video/mp4', expire: 1999999999, urlIpFamily: null,
+    });
+    expect(r?.headers).toEqual({ 'User-Agent': 'UA', 'Accept-Encoding': 'identity' });
+  });
+
+  it('en la misma altura gana el de mayor tbr (720p60 sobre 720p30); a igualdad, más fps', () => {
+    const info = { formats: [vf('136', 720, { tbr: 1500 }), vf('298', 720, { tbr: 3000, fps: 60 }), vf('a', 480, { tbr: 900 }), vf('b', 480, { tbr: 900, fps: 60 })] };
+    expect(heights(info)).toEqual([[480, 'b'], [720, '298']]);
+  });
+
+  it('sin DRM, sin URLs ajenas a googlevideo, solo avc1 mp4 https sin audio', () => {
+    const info = {
+      formats: [
+        vf('1', 360, { has_drm: true }),
+        vf('2', 360, { url: 'https://example.com/v.mp4' }),
+        vf('3', 360, { url: gv('3').replace('https:', 'http:') }),
+        vf('4', 360, { protocol: 'm3u8_native' }),
+        vf('5', 360, { protocol: 'http_dash_segments' }),
+        vf('6', 360, { vcodec: 'vp09.00.21.08', ext: 'webm' }),
+        vf('7', 360, { vcodec: 'av01.0.05M.08' }),
+        vf('18', 360, { acodec: 'mp4a.40.2' }),
+        vf('8', 360, { ext: 'webm' }),
+        vf('9', 0),
+        vf('', 360),
+        af('140'),
+        vf('134', 240),
+      ],
+    };
+    expect(heights(info)).toEqual([[240, '134']]);
+  });
+
+  it('video vertical (Short): la calidad es el lado corto y se conservan width y height reales', () => {
+    const vert = (id: string, w: number, h: number, over: Record<string, unknown> = {}) => vf(id, h, { width: w, tbr: w * 3, ...over });
+    const info = {
+      formats: [vert('137', 1080, 1920), vert('136', 720, 1280), vert('135', 480, 854), vert('134', 360, 640), vert('299', 2160, 3840)],
+    };
+    const q = (max: number) => videoPreviewRenditions(info, max).map((r) => [r.quality, r.width, r.height, r.formatId]);
+    expect(q(1080)).toEqual([
+      [360, 360, 640, '134'],
+      [480, 480, 854, '135'],
+      [720, 720, 1280, '136'],
+      [1080, 1080, 1920, '137'],
+    ]);
+    expect(q(720).map(([, , , id]) => id)).toEqual(['134', '135', '136']);
+    expect(previewSourceFor(info, '137', 1080)).toMatchObject({ formatId: '137', width: 1080, height: 1920, quality: 1080 });
+    expect(previewSourceFor(info, '137', 720)).toBeNull();
+    // Sin width, la calidad es height (comportamiento anterior)
+    expect(videoPreviewRenditions({ formats: [vf('136', 720, { width: undefined })] }, 1080)[0]).toMatchObject({ width: null, height: 720, quality: 720 });
+    // Horizontal: quality = height
+    expect(videoPreviewRenditions({ formats: [vf('136', 720)] }, 1080)[0]?.quality).toBe(720);
+  });
+
+  it('size sale de filesize, clen o el clen de la URL', () => {
+    const info = { formats: [vf('134', 360, { filesize: undefined }), vf('136', 720, { filesize: undefined, clen: 99 })] };
+    expect(videoPreviewRenditions(info, 1080).map((r) => r.size)).toEqual([4321, 99]);
+  });
+
+  it('previewSourceFor: variantes permitidas y el mejor m4a; el resto, null', () => {
+    const info = { formats: [vf('134', 360), vf('137', 1080), af('140'), af('139', { acodec: 'mp4a.40.5', abr: 48 }), af('251')] };
+    expect(previewSourceFor(info, '134', 1080)).toMatchObject({ formatId: '134', contentType: 'video/mp4', height: 360 });
+    expect(previewSourceFor(info, '140', 1080)).toMatchObject({ formatId: '140', contentType: 'audio/mp4' });
+    expect(previewSourceFor(info, '137', 720)).toBeNull();
+    expect(previewSourceFor(info, '139', 1080)).toBeNull();
+    expect(previewSourceFor(info, '251', 1080)).toBeNull();
+    expect(previewSourceFor(info, '999', 1080)).toBeNull();
+    expect(previewAudioSource(info)?.formatId).toBe('140');
+    expect(previewAudioSource({ formats: [af('251')] })).toBeNull();
+  });
+
+  it('fixture real: 160/133/134 y el m4a 140', () => {
+    const info = sample as unknown as Record<string, unknown>;
+    expect(heights(info).map(([, id]) => id)).toEqual(['160', '133', '134']);
+    expect(previewSourceFor(info, '140', 1080)?.contentType).toBe('audio/mp4');
   });
 });
 

@@ -25,6 +25,8 @@ interface Ref {
   size: number;
   duration: number;
   type?: 0 | 1;
+  /** Tercera palabra de la referencia (starts_with_SAP, SAP_type, SAP_delta_time). */
+  sap?: number;
 }
 
 interface SidxOpts {
@@ -60,7 +62,7 @@ function sidx({ version = 0, timescale = 90000, ept = 0n, firstOffset = 0n, refs
   refs.forEach((r, i) => {
     body.writeUInt32BE((((r.type ?? 0) << 31) | r.size) >>> 0, i * 12);
     body.writeUInt32BE(r.duration, i * 12 + 4);
-    body.writeUInt32BE(0x90000000, i * 12 + 8); // starts_with_SAP=1, SAP_type=1
+    body.writeUInt32BE(r.sap ?? 0x90000000, i * 12 + 8); // por defecto starts_with_SAP=1, SAP_type=1
   });
   return box('sidx', Buffer.concat([head, body]));
 }
@@ -101,9 +103,9 @@ describe('parseMp4Index: sidx versión 0 y 1', () => {
       timescale: 90000,
       earliestPresentationTime: 3000,
       segments: [
-        { offset: sidxEnd, size: 1000, start: 3000, duration: 180000 },
-        { offset: sidxEnd + 1000, size: 2500, start: 183000, duration: 180000 },
-        { offset: sidxEnd + 3500, size: 700, start: 363000, duration: 45000 },
+        { offset: sidxEnd, size: 1000, start: 3000, duration: 180000, startsWithSap: true, sapType: 1 },
+        { offset: sidxEnd + 1000, size: 2500, start: 183000, duration: 180000, startsWithSap: true, sapType: 1 },
+        { offset: sidxEnd + 3500, size: 700, start: 363000, duration: 45000, startsWithSap: true, sapType: 1 },
       ],
     });
   });
@@ -118,8 +120,22 @@ describe('parseMp4Index: sidx versión 0 y 1', () => {
     expect(idx.earliestPresentationTime).toBe(5_000_000_000);
     expect(idx.sidxEnd).toBe(sidxEnd);
     expect(idx.segments).toEqual([
-      { offset: sidxEnd + 24, size: 1000, start: 5_000_000_000, duration: 180000 },
-      { offset: sidxEnd + 1024, size: 2500, start: 5_000_180_000, duration: 180000 },
+      { offset: sidxEnd + 24, size: 1000, start: 5_000_000_000, duration: 180000, startsWithSap: true, sapType: 1 },
+      { offset: sidxEnd + 1024, size: 2500, start: 5_000_180_000, duration: 180000, startsWithSap: true, sapType: 1 },
+    ]);
+  });
+
+  it('expone starts_with_SAP y SAP_type de cada referencia', () => {
+    const refs: Ref[] = [
+      { size: 100, duration: 10, sap: 0xa0000000 }, // SAP tipo 2
+      { size: 100, duration: 10, sap: 0x00000000 }, // sin SAP
+      { size: 100, duration: 10, sap: 0x30000005 }, // tipo 3 sin starts_with_SAP y con delta
+    ];
+    const idx = ok(Buffer.concat([ftyp(), moov(), sidx({ refs })]));
+    expect(idx.segments.map((s) => [s.startsWithSap, s.sapType])).toEqual([
+      [true, 2],
+      [false, 0],
+      [false, 3],
     ]);
   });
 
@@ -177,6 +193,14 @@ describe('parseMp4Index: need-more', () => {
     expect(parseMp4Index(full.subarray(0, at + 3))).toEqual({ kind: 'need-more', needBytes: at + 16 });
   });
 
+  it('cabecera largesize a medias: pide los 16 bytes de la cabecera', () => {
+    const half = Buffer.alloc(12);
+    half.writeUInt32BE(1, 0);
+    half.write('moov', 4, 'latin1');
+    expect(parseMp4Index(Buffer.concat([f, half]))).toEqual({ kind: 'need-more', needBytes: f.length + 16 });
+    expect(parseMp4Index(Buffer.concat([f, half.subarray(0, 8)]))).toEqual({ kind: 'need-more', needBytes: f.length + 16 });
+  });
+
   it('pide el sidx completo y con esos bytes ya resuelve', () => {
     const sidxEnd = f.length + m.length + s.length;
     expect(parseMp4Index(full.subarray(0, sidxEnd - 1))).toEqual({ kind: 'need-more', needBytes: sidxEnd });
@@ -230,6 +254,9 @@ describe('parseMp4Index: entradas rechazadas', () => {
     ['sidx más corto que su parte fija', () => Buffer.concat([f, m, box('sidx', Buffer.alloc(10))]), 'bad-sidx'],
     ['referencia de tamaño 0', () => Buffer.concat([f, m, sidx({ refs: [{ size: 0, duration: 90000 }] })]), 'bad-sidx'],
     ['referencia de duración 0', () => Buffer.concat([f, m, sidx({ refs: [{ size: 10, duration: 0 }] })]), 'bad-sidx'],
+    ['first_offset v1 fuera de Number.MAX_SAFE_INTEGER', () => Buffer.concat([f, m, sidx({ version: 1, firstOffset: 2n ** 60n, refs: REFS })]), 'bad-sidx'],
+    ['earliest_presentation_time v1 fuera de Number.MAX_SAFE_INTEGER', () => Buffer.concat([f, m, sidx({ version: 1, ept: 2n ** 60n, refs: REFS })]), 'bad-sidx'],
+    ['tiempos acumulados fuera de rango', () => Buffer.concat([f, m, sidx({ version: 1, ept: BigInt(Number.MAX_SAFE_INTEGER) - 10n, refs: REFS })]), 'bad-sidx'],
     ['fragmentos dentro del segmento de inicialización', () => {
       const s = sidx({ refs: REFS });
       return Buffer.concat([f, s, moov(200)]);

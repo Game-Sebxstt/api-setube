@@ -222,7 +222,7 @@ export interface Source {
   url: string;
   headers: Record<string, string>;
   size: number | null;
-  contentType: 'audio/mp4' | 'audio/webm';
+  contentType: 'audio/mp4' | 'audio/webm' | 'video/mp4';
   expire: number;
   availableAt: number | null;
   urlIpFamily: 4 | 6 | null;
@@ -296,16 +296,90 @@ export function rankPreviewFormats(info: Record<string, unknown>, codec?: Codec)
       (ida < idb ? -1 : ida > idb ? 1 : 0)
     );
   });
-  return cands.map(({ f, u, group }) => ({
+  return cands.map(({ f, u, group }) => toSource(f, u, group === 'aac' ? 'audio/mp4' : 'audio/webm'));
+}
+
+function toSource(f: Record<string, unknown>, u: URL, contentType: Source['contentType']): Source {
+  return {
     formatId: str(f.format_id),
     url: f.url as string,
     headers: previewHeaders(f.http_headers),
     size: posInt(f.filesize) ?? posInt(f.clen) ?? posInt(u.searchParams.get('clen')),
-    contentType: group === 'aac' ? 'audio/mp4' : 'audio/webm',
+    contentType,
     expire: Number(u.searchParams.get('expire')) || 0,
     availableAt: typeof f.available_at === 'number' && Number.isFinite(f.available_at) ? f.available_at : null,
     urlIpFamily: ipFamily(u),
-  }));
+  };
+}
+
+export interface VideoRendition extends Source {
+  contentType: 'video/mp4';
+  width: number | null;
+  height: number;
+  /** Calidad nominal (360, 720, 1080…): el lado corto, min(width, height); height si falta width. */
+  quality: number;
+  fps: number | null;
+  tbr: number | null;
+  vcodec: string;
+}
+
+/**
+ * Variantes de video para el streaming HLS: avc1 en mp4 sin audio, https, sin DRM y de googlevideo; la de mayor tbr
+ * por calidad. La calidad se mide por el lado corto, como YouTube: un Short 1080x1920 es 1080p y entra con maxHeight
+ * 1080. width y height se conservan tal cual para el RESOLUTION del playlist.
+ */
+export function videoPreviewRenditions(info: Record<string, unknown>, maxHeight: number): VideoRendition[] {
+  const formats = Array.isArray(info.formats) ? info.formats.filter(isObj) : [];
+  const byQuality = new Map<number, VideoRendition>();
+  for (const f of formats) {
+    if (!str(f.vcodec).startsWith('avc1') || str(f.acodec) !== 'none' || str(f.ext) !== 'mp4') continue;
+    if (str(f.protocol) !== 'https' || f.has_drm === true || str(f.format_id) === '') continue;
+    const height = posInt(f.height);
+    if (height === null) continue;
+    const width = posInt(f.width);
+    const quality = width === null ? height : Math.min(width, height);
+    if (quality > maxHeight) continue;
+    const u = googlevideoUrl(f.url);
+    if (!u) continue;
+    const r: VideoRendition = {
+      ...toSource(f, u, 'video/mp4'),
+      contentType: 'video/mp4',
+      width,
+      height,
+      quality,
+      fps: num(f.fps),
+      tbr: num(f.tbr),
+      vcodec: str(f.vcodec),
+    };
+    const prev = byQuality.get(quality);
+    if (!prev || better(r, prev)) byQuality.set(quality, r);
+  }
+  return [...byQuality.values()].sort((a, b) => a.quality - b.quality);
+}
+
+// Mayor tbr; a igualdad, más fps y el format_id menor, para que la elección sea estable
+function better(a: VideoRendition, b: VideoRendition): boolean {
+  const ta = a.tbr ?? -1;
+  const tb = b.tbr ?? -1;
+  if (ta !== tb) return ta > tb;
+  const fa = a.fps ?? -1;
+  const fb = b.fps ?? -1;
+  if (fa !== fb) return fa > fb;
+  return a.formatId < b.formatId;
+}
+
+// Fuente de un formato concreto si está en la lista permitida (variantes de video + mejor m4a); si no, null
+export function previewSourceFor(info: Record<string, unknown>, formatId: string, maxHeight: number): Source | null {
+  const video = videoPreviewRenditions(info, maxHeight).find((r) => r.formatId === formatId);
+  if (video) return video;
+  const audio = previewAudioSource(info);
+  return audio && audio.formatId === formatId ? audio : null;
+}
+
+// Mejor m4a (AAC) para el grupo de audio del HLS; el opus no vale en fMP4/HLS
+export function previewAudioSource(info: Record<string, unknown>): Source | null {
+  const first = rankPreviewFormats(info, 'aac')[0];
+  return first && first.contentType === 'audio/mp4' ? first : null;
 }
 
 const ZIP64_THRESHOLD = 3.5 * 2 ** 30;

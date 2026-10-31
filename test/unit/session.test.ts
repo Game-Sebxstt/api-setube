@@ -5,7 +5,7 @@ import { AppError } from '../../src/lib/errors.js';
 import { createDeadline } from '../../src/lib/preview/deadline.js';
 import { createSession, forbiddenKey, type SessionDeps } from '../../src/lib/preview/session.js';
 import { fakeRedis } from './helpers/fake-app.js';
-import { audioFormat, fakeFetch, fakeMeta, gvUrl, infoWith, nowSec, pattern, serve, status, type Call } from './helpers/upstream.js';
+import { audioFormat, fakeFetch, fakeMeta, gvUrl, infoWith, nowSec, pattern, serve, status, videoFormat, type Call } from './helpers/upstream.js';
 
 const ID = 'jNQXAC9IVRw';
 const MiB = 1024 * 1024;
@@ -311,5 +311,82 @@ describe('createSession: plazos y backpressure', () => {
     const dl = createDeadline(10_000);
     expect(code(await s.prepare(dl).catch((e) => e))).toBe('UPSTREAM_ERROR');
     dl.clear();
+  });
+});
+
+describe('createSession: por formatId (video en streaming)', () => {
+  const data = pattern(3000);
+  const byId = (formatId: string, maxHeight = 1080) => ({ formatId, maxHeight });
+  const videoInfo = (over: Record<string, unknown> = {}) =>
+    infoWith([videoFormat('134', 360, 3000), videoFormat('136', 720, 3000, over), audioFormat('140', 3000), audioFormat('251', 3000)]);
+
+  async function runFormat(deps: SessionDeps, formatId: string, maxHeight = 1080) {
+    const s = createSession(deps, ID, byId(formatId, maxHeight), never());
+    const dl = createDeadline(10_000);
+    await s.prepare(dl);
+    const first = await s.openFirst(null, dl);
+    dl.clear();
+    return { s, body: await collect(s.stream(first.opened, first.end)) };
+  }
+
+  it('abre la variante pedida con Content-Type video/mp4 y su ETag', async () => {
+    const t = setup({ info: videoInfo(), handler: (c) => serve(data, c) });
+    const { s, body } = await runFormat(t.deps, '136');
+    expect(body.equals(data)).toBe(true);
+    expect(s.src).toMatchObject({ formatId: '136', contentType: 'video/mp4' });
+    expect(s.etag).toBe('"136-3000"');
+    expect(t.f.calls[0]?.url).toContain('itag=136');
+  });
+
+  it('el m4a de la lista permitida se abre como audio/mp4', async () => {
+    const t = setup({ info: videoInfo(), handler: (c) => serve(data, c) });
+    const { s } = await runFormat(t.deps, '140');
+    expect(s.src).toMatchObject({ formatId: '140', contentType: 'audio/mp4' });
+  });
+
+  it.each([
+    ['opus', '251', 1080],
+    ['por encima de maxHeight', '136', 480],
+    ['desconocido', '999', 1080],
+  ])('formato fuera de la lista (%s) → FORMAT_UNAVAILABLE sin tocar upstream', async (_n, id, max) => {
+    const t = setup({ info: videoInfo(), handler: (c) => serve(data, c) });
+    const s = createSession(t.deps, ID, byId(id, max), never());
+    const dl = createDeadline(10_000);
+    expect(code(await s.prepare(dl).catch((e) => e))).toBe('FORMAT_UNAVAILABLE');
+    dl.clear();
+    expect(t.f.calls).toHaveLength(0);
+  });
+
+  it('403 → refresh con el mismo formatId y URL nueva → 206', async () => {
+    const soon = videoInfo({ url: gvUrl('136').replace(/expire=\d+/, `expire=${nowSec() + 100}`) });
+    const fresh = infoWith([videoFormat('136', 720, 3000, { url: gvUrl('136', '&fresh=1') }), audioFormat('140', 3000)]);
+    const t = setup({ info: soon, refreshed: fresh, handler: (c) => (c.url.includes('fresh=1') ? serve(data, c) : status(403)) });
+    const { s, body } = await runFormat(t.deps, '136');
+    expect(body.equals(data)).toBe(true);
+    expect(s.stats).toMatchObject({ retry403: 'refresh', refreshed: true, formatId: '136' });
+  });
+
+  it('403 → refresh en el que el formato desaparece → UPSTREAM_FORBIDDEN sin cambiar a otra variante', async () => {
+    const soon = videoInfo({ url: gvUrl('136').replace(/expire=\d+/, `expire=${nowSec() + 100}`) });
+    const gone = infoWith([videoFormat('134', 360, 3000, { url: gvUrl('134', '&fresh=1') }), audioFormat('140', 3000)]);
+    const t = setup({ info: soon, refreshed: gone, handler: (c) => (c.url.includes('fresh=1') ? serve(data, c) : status(403)) });
+    const s = createSession(t.deps, ID, byId('136'), never());
+    const dl = createDeadline(10_000);
+    await s.prepare(dl);
+    expect(code(await s.openFirst(null, dl).catch((e) => e))).toBe('UPSTREAM_FORBIDDEN');
+    dl.clear();
+    expect(s.stats.retry403).toBe('failed');
+    expect(t.f.calls.every((c) => c.url.includes('itag=136'))).toBe(true);
+    expect(t.warn).toHaveBeenCalledWith('preview_format_gone', expect.objectContaining({ videoId: ID, formatId: '136' }));
+  });
+
+  it('antes de decidir si refrescar olvida la caché en memoria del info JSON', async () => {
+    const soon = videoInfo({ url: gvUrl('136').replace(/expire=\d+/, `expire=${nowSec() + 100}`) });
+    const t = setup({ info: soon, handler: (c) => (c.url.includes('fresh=1') ? serve(data, c) : status(403)) });
+    const forget = vi.fn();
+    const deps = { ...t.deps, metadata: { ...t.deps.metadata, forget } };
+    t.metadata.refresh.mockResolvedValue({ meta: fakeMeta(), infoJson: infoWith([videoFormat('136', 720, 3000, { url: gvUrl('136', '&fresh=1') })]) });
+    await runFormat(deps, '136');
+    expect(forget).toHaveBeenCalledWith(ID);
   });
 });

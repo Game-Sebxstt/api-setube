@@ -11,6 +11,10 @@ export interface Mp4Segment {
   start: number;
   /** Duración en unidades de `timescale`. */
   duration: number;
+  /** starts_with_SAP del sidx: el fragmento empieza en un punto de acceso (keyframe). */
+  startsWithSap: boolean;
+  /** SAP_type del sidx (1 y 2 permiten empezar a decodificar ahí; 0 es desconocido). */
+  sapType: number;
 }
 
 export interface Mp4Index {
@@ -141,9 +145,10 @@ function parseSidx(view: DataView, box: BoxHeader): Omit<Mp4Index, 'initEnd'> {
     if (ref >>> 31 === 1) throw new Mp4IndexError('hierarchical-sidx', 'el sidx apunta a otro sidx (índice jerárquico)');
     const size = ref & 0x7fffffff;
     const duration = view.getUint32(p + 4);
+    const sap = view.getUint32(p + 8);
     if (size === 0) throw new Mp4IndexError('bad-sidx', `referencia ${i} con tamaño 0`);
     if (duration === 0) throw new Mp4IndexError('bad-sidx', `referencia ${i} con duración 0`);
-    segments.push({ offset, size, start, duration });
+    segments.push({ offset, size, start, duration, startsWithSap: sap >>> 31 === 1, sapType: (sap >>> 28) & 0x7 });
     offset += size;
     start += duration;
   }

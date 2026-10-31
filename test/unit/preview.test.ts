@@ -209,6 +209,15 @@ describe('GET /api/videos/:videoId/audio: respuestas', () => {
     expect(log.finished()[0]).toMatchObject({ retry403: 'refresh', refreshed: true, outcome: 'ok' });
   });
 
+  it('dos peticiones seguidas al mismo video no vuelven a leer ni parsear el info JSON', async () => {
+    const { app, metadata } = await make();
+    const port = await listen(app);
+    expect((await get(port, URL_, { range: 'bytes=0-9' })).status).toBe(206);
+    expect((await get(port, URL_, { range: 'bytes=10-19' })).status).toBe(206);
+    expect(metadata.readInfoJson).toHaveBeenCalledTimes(1);
+    expect(metadata.refresh).not.toHaveBeenCalled();
+  });
+
   it('upstream colgado → el vigilante corta el tramo y se reanuda', async () => {
     const data = pattern(5000);
     const handler = (c: Call, n: number) => {

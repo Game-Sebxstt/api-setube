@@ -10,6 +10,7 @@ import { parseRange } from '../lib/http/range.js';
 import { clientIp, ipHash } from '../lib/ip.js';
 import { binaryHeaders } from '../lib/jobs/stream-item.js';
 import { createDeadline, withDeadline } from '../lib/preview/deadline.js';
+import { createInfoCache } from '../lib/preview/info-cache.js';
 import { createPreviewLeases, type PreviewLease } from '../lib/preview/leases.js';
 import { createSession, type PreviewSession } from '../lib/preview/session.js';
 import type { Outcome, PreviewConn, PreviewStats } from '../lib/preview/types.js';
@@ -71,6 +72,8 @@ const previewRoute: FastifyPluginAsyncTypebox = async (app) => {
     warn,
   });
   const active = new Set<Preview>();
+  // Info JSON parseado en memoria (~60 s): las peticiones seguidas al mismo video no vuelven a leerlo y parsearlo de Redis
+  const infoCache = createInfoCache(app.yt.metadata);
 
   app.addHook('preClose', async () => {
     for (const pv of active) {
@@ -187,7 +190,7 @@ const previewRoute: FastifyPluginAsyncTypebox = async (app) => {
             fetch: app.deps.upstreamFetch,
             chunkBytes: config.previewChunkBytes,
             headersTimeoutMs: tuning.headersTimeoutMs,
-            metadata: app.yt.metadata,
+            metadata: infoCache,
             redis: app.redis,
             warn,
             retryDelayMs: tuning.retryDelayMs,
