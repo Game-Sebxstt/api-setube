@@ -51,6 +51,9 @@ El WAV sale con cabecera RIFF de tamaño indeterminado y el M4A/MP4 como MP4 fra
 | POST | `/api/resolve` | Recibe una lista de enlaces y devuelve qué es cada uno (video, playlist o inválido) con datos de oEmbed. |
 | GET | `/api/videos/:videoId` | Metadata completa de un video con yt-dlp. |
 | GET | `/api/videos/:videoId/audio` | Audio original del video para escucharlo en el navegador, con soporte de `Range` (ver «Escucha en streaming»). |
+| GET | `/api/videos/:videoId/hls/master.m3u8?sid=` | Master playlist HLS para ver el video en el navegador (ver «Video en streaming»). |
+| GET | `/api/videos/:videoId/hls/:formatId.m3u8?sid=` | Media playlist HLS de una variante de video o del audio. |
+| GET | `/api/videos/:videoId/media/:formatId?sid=` | Bytes de un formato permitido (segmentos del HLS), con soporte de `Range`. |
 | POST | `/api/playlists/resolve` | Lista los videos de una playlist (hasta `MAX_PLAYLIST_ITEMS`). |
 | GET | `/api/search?q=` | Busca videos en YouTube (ver «Búsqueda»). |
 | POST | `/api/jobs` | Crea un job: `{ items: [{ videoId }], format, quality?, turnstileToken? }`. Responde 201. |
@@ -60,7 +63,7 @@ El WAV sale con cabecera RIFF de tamaño indeterminado y el M4A/MP4 como MP4 fra
 | GET | `/api/jobs/:id/items/:itemId/file` | Descarga un item convertido, en streaming. |
 | GET | `/api/jobs/:id/archive` | Descarga todos los items válidos en un ZIP, en streaming. |
 
-Rate limits por IP (por minuto): 10 en `POST /api/jobs` y `POST /api/playlists/resolve`, 20 en las descargas, 20 en `/api/search` (`SEARCH_RATE_LIMIT_MAX`), 30 en `/api/resolve`, SSE y `DELETE`, 120 en `/api/videos`, 60 en el audio (`PREVIEW_RATE_LIMIT_MAX`). El resto usa `RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW_MS`.
+Rate limits por IP (por minuto): 10 en `POST /api/jobs` y `POST /api/playlists/resolve`, 20 en las descargas, 20 en `/api/search` (`SEARCH_RATE_LIMIT_MAX`), 30 en `/api/resolve`, SSE y `DELETE`, 120 en `/api/videos`, 60 en el audio (`PREVIEW_RATE_LIMIT_MAX`), 600 en cada ruta del video (`PREVIEW_SEGMENT_RATE_LIMIT_MAX`, con contadores separados para el master, los playlists y los segmentos). El resto usa `RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW_MS`.
 
 Todos los errores tienen la misma forma:
 
@@ -109,6 +112,37 @@ Todos los errores tienen la misma forma:
 - Railway corta cualquier petición HTTP a los 15 minutos. En audios largos el navegador retoma solo con un `Range` desde donde iba, así que la escucha sigue.
 
 Cada petición deja una línea `preview_finished` en el log con el formato, los bytes, el resultado (`ok`, `error`, `client_closed`, `idle`, `superseded` o `shutdown`) y los reintentos. Nunca registra URLs, cabeceras, IPs ni el `sid` en claro.
+
+## Video en streaming
+
+La web también puede mostrar la imagen del video. La API genera un HLS VOD (RFC 8216) a partir de los formatos adaptativos de YouTube: el video sin audio en avc1/MP4 (itags 134, 135, 136, 137…) y el audio m4a/AAC (itag 140) se sirven por separado y el navegador los junta en un solo reproductor (hls.js sobre MSE, o el HLS nativo de Safari). Igual que la escucha, no usa ffmpeg, no escribe a disco y no ocupa turnos de la cola.
+
+```
+GET /api/videos/:videoId/hls/master.m3u8?sid=<32 hex>     → variantes avc1 + grupo de audio AAC
+GET /api/videos/:videoId/hls/:formatId.m3u8?sid=<32 hex>  → EXT-X-MAP (init) + segmentos EXT-X-BYTERANGE
+GET /api/videos/:videoId/media/:formatId?sid=<32 hex>     → bytes del formato con Range (206/200/416)
+```
+
+- **Cómo se trocea.** Esos formatos son MP4 fragmentados con un índice `sidx` al principio. La API lee los primeros 64 KiB del formato (hasta 1 MiB si el índice no cabe), saca de ahí dónde empieza y cuánto dura cada fragmento y genera el playlist con rangos de bytes del archivo original. El índice se guarda en Redis (`pv:idx:<videoId>:<formatId>:<tamaño>`, `INFO_JSON_TTL_SEC`) y en memoria, así que cada formato se lee una sola vez.
+- **Master.** `#EXT-X-VERSION:7`, `#EXT-X-INDEPENDENT-SEGMENTS`, un grupo de audio (`GROUP-ID="aud"`, `DEFAULT=YES`, `AUTOSELECT=YES`) y una variante por calidad con `BANDWIDTH`, `AVERAGE-BANDWIDTH`, `RESOLUTION`, `FRAME-RATE`, `CODECS="avc1…,mp4a.40.2"` y `AUDIO="aud"`.
+  - Variantes: avc1 en MP4, https, sin DRM y de googlevideo, hasta `PREVIEW_VIDEO_MAX_HEIGHT` medido por el lado corto (un Short de 1080x1920 es 1080p). Por calidad se queda la de mayor bitrate. Sin VP9 ni AV1, así que el máximo es 1080p.
+  - La primera variante es la de arranque: 720p o la más cercana por debajo (si no hay ninguna, la más baja). Después van el resto de menor a mayor.
+  - `AVERAGE-BANDWIDTH` es el tamaño del archivo entre la duración (o el `tbr` de yt-dlp si falta el tamaño), más el audio. `BANDWIDTH` es 1,5 veces la media: el master no espera a los índices para no retrasar el arranque.
+  - Al responder, el master calcula en segundo plano los índices del audio y de la variante de arranque, así los dos playlists que el reproductor pide a continuación salen de memoria.
+- **Media playlist.** `#EXT-X-PLAYLIST-TYPE:VOD`, `#EXT-X-TARGETDURATION`, `#EXT-X-MAP` con el init (`ftyp` + `moov`) por `BYTERANGE`, segmentos de ~6 s (fragmentos consecutivos del `sidx` agrupados, sin pasar de 9 s salvo que un fragmento ya sea más largo) y `#EXT-X-ENDLIST`. Un segmento solo empieza en un fragmento que arranca en un keyframe. Si la info actual dice que el archivo cambió de tamaño, el índice se vuelve a calcular antes de responder.
+- **URIs relativas** y con el mismo `sid` en todas: el master apunta a `<formatId>.m3u8?sid=…` y los segmentos a `../media/<formatId>?sid=…`.
+- **`/media/:formatId`** es el mismo proxy que `/audio` (tramos de 10 MiB, reintentos ante 403/410, `ETag`/`If-Range`, backpressure). Solo sirve los formatos del master: un `formatId` fuera de esa lista responde 404 `FORMAT_UNAVAILABLE`, y uno con forma inválida, 400 `INVALID_INPUT`.
+- **Cabeceras.** Los playlists salen con `Content-Type: application/vnd.apple.mpegurl` y `Cache-Control: private, max-age=600`; los errores, con `no-store`. CORS expone `Content-Range`, `Accept-Ranges` y `Content-Length`.
+- **El reproductor.** El `sid` es obligatorio en las tres rutas (400 si falta). Todas las peticiones de un reproductor cuentan como uno solo en `PREVIEW_MAX_STREAMS_PER_IP`, comparten el hueco con `/audio` del mismo `sid` y pueden tener hasta 6 conexiones a la vez (la séptima corta la más antigua). Entre segmentos, con el buffer lleno o en pausa, el reproductor conserva su hueco 45 s.
+- **Errores.**
+  - Master sin variantes de video o sin m4a: 422 `FORMAT_UNAVAILABLE`.
+  - Playlist de un formato que no está en el master, o cuyo índice no se puede leer: 404 `FORMAT_UNAVAILABLE`.
+  - Directos: 422 `LIVE_NOT_SUPPORTED`. Más largo que `MAX_DURATION_AUDIO_SEC` (la duración de la escucha, no la de las conversiones mp4): 422 `LIMIT_DURATION`.
+  - `Origin` o `Referer` fuera de `CORS_ORIGINS`: 403.
+  - `PREVIEW_VIDEO_ENABLED=false` (o `PREVIEW_ENABLED=false`): 503 `SERVICE_UNAVAILABLE` en las tres rutas y `/api/config` responde `previewVideo: false`. La escucha sigue funcionando.
+- **Rate limit.** `PREVIEW_SEGMENT_RATE_LIMIT_MAX` peticiones por minuto e IP, con un contador para cada ruta (master, playlists y segmentos), sin gastar el de `/audio` ni el global.
+
+Cada segmento deja su línea `preview_finished` con `kind: "media"`.
 
 ## Bloqueo de YouTube: PO token, proxy y cookies
 
@@ -330,12 +364,15 @@ Los valores por defecto de esta tabla son los del código (`src/config/env.ts`);
 
 | Variable | Default | Descripción |
 |---|---|---|
-| `PREVIEW_ENABLED` | `true` | Activa la ruta de audio. Con `false` responde 503 y la web oculta el botón de escuchar. |
-| `PREVIEW_MAX_STREAMS_PER_IP` | `4` | Reproductores simultáneos por IP. |
-| `PREVIEW_MAX_STREAMS_PER_INSTANCE` | `100` | Conexiones de audio abiertas por instancia. |
+| `PREVIEW_ENABLED` | `true` | Activa la ruta de audio (y es requisito del video). Con `false` responde 503 y la web oculta el botón de escuchar. |
+| `PREVIEW_MAX_STREAMS_PER_IP` | `4` | Reproductores simultáneos por IP (audio y video del mismo reproductor cuentan uno). |
+| `PREVIEW_MAX_STREAMS_PER_INSTANCE` | `100` | Conexiones de audio y video abiertas por instancia (`/audio` y `/media` juntas). |
 | `PREVIEW_RATE_LIMIT_MAX` | `60` | Peticiones por minuto e IP a la ruta de audio. |
 | `PREVIEW_CHUNK_BYTES` | `10485760` | Tamaño de cada tramo pedido a YouTube (10 MiB). Entre 1048576 y 10485760. |
 | `PREVIEW_IDLE_TIMEOUT_MS` | `60000` | Corta la conexión si el navegador deja de leer durante este tiempo. Mínimo 5000. |
+| `PREVIEW_VIDEO_ENABLED` | `true` | Activa el video en streaming (playlists HLS y `/media`). Con `false` responde 503 y `/api/config` pasa a `previewVideo: false`. |
+| `PREVIEW_VIDEO_MAX_HEIGHT` | `1080` | Calidad máxima de las variantes de video, por el lado corto del fotograma. Entre 144 y 1080. |
+| `PREVIEW_SEGMENT_RATE_LIMIT_MAX` | `600` | Peticiones por minuto e IP a cada ruta del video (master, playlists y segmentos, con contadores separados). |
 
 ### Búsqueda
 
@@ -371,7 +408,7 @@ La API valida la configuración al iniciar. Si algo no cuadra, registra un log `
 - `REDIS_URL` con protocolo `redis:`/`rediss:` y contraseña vacía o hex de 32+ caracteres.
 - `IP_HASH_SALT` presente en producción.
 - `CORS_ORIGINS` con al menos un origen.
-- `PREVIEW_CHUNK_BYTES` entre 1048576 y 10485760, y `PREVIEW_IDLE_TIMEOUT_MS` de al menos 5000.
+- `PREVIEW_CHUNK_BYTES` entre 1048576 y 10485760, `PREVIEW_IDLE_TIMEOUT_MS` de al menos 5000 y `PREVIEW_VIDEO_MAX_HEIGHT` entre 144 y 1080.
 - `SEARCH_MAX_RESULTS` de 20 como máximo.
 - `CLIENT_IP_HEADER` vacío o un nombre de cabecera válido (letras, números y guiones, hasta 64; se pasa a minúsculas).
 - `POT_PROVIDER_URL` vacío o una URL `http:`/`https:` sin usuario, query, `,` ni `;` (yt-dlp usa esos dos como separadores en `--extractor-args`).
@@ -381,7 +418,7 @@ La API valida la configuración al iniciar. Si algo no cuadra, registra un log `
 
 ### `/api/config`
 
-El cliente lee los límites de `GET /api/config` (caché de 5 min), así que al cambiar las variables la web se ajusta sola. Expone `maxItemsPerJob`, `maxPlaylistItems`, `maxDurationAudioSec`, `maxDurationVideoSec`, las calidades por formato, las calidades por defecto (mp3 192, mp4 720), si Turnstile está activo, si la escucha en streaming está disponible (`preview`) y si la búsqueda está activa (`search`). Por esa caché, apagar `PREVIEW_ENABLED` puede tardar hasta 5 minutos en reflejarse en la web.
+El cliente lee los límites de `GET /api/config` (caché de 5 min), así que al cambiar las variables la web se ajusta sola. Expone `maxItemsPerJob`, `maxPlaylistItems`, `maxDurationAudioSec`, `maxDurationVideoSec`, las calidades por formato, las calidades por defecto (mp3 192, mp4 720), si Turnstile está activo, si la escucha en streaming está disponible (`preview`), si el video en streaming está disponible (`previewVideo`, que exige `PREVIEW_ENABLED` y `PREVIEW_VIDEO_ENABLED`) y si la búsqueda está activa (`search`). Por esa caché, apagar `PREVIEW_ENABLED` o `PREVIEW_VIDEO_ENABLED` puede tardar hasta 5 minutos en reflejarse en la web.
 
 ## Producción con Docker Compose
 
@@ -529,6 +566,9 @@ PREVIEW_MAX_STREAMS_PER_INSTANCE="100"
 PREVIEW_RATE_LIMIT_MAX="60"
 PREVIEW_CHUNK_BYTES="10485760"
 PREVIEW_IDLE_TIMEOUT_MS="60000"
+PREVIEW_VIDEO_ENABLED="true"
+PREVIEW_VIDEO_MAX_HEIGHT="1080"
+PREVIEW_SEGMENT_RATE_LIMIT_MAX="600"
 ```
 
 ### Prueba de la escucha tras desplegar
@@ -543,6 +583,13 @@ PREVIEW_IDLE_TIMEOUT_MS="60000"
 2. En los logs, `proxy_hops_seen` debe mostrar `cfConnectingIp: true`, sin avisos `client_ip_header_missing` ni `trust_proxy_disabled`.
 3. Desde una misma red, cinco `curl --limit-rate 16k` en paralelo, cada uno con un `&sid=` distinto de 32 hex: el quinto debe dar `429 TOO_MANY_PREVIEWS`. Mientras siguen abiertos, uno desde otra red (por ejemplo, datos móviles) debe dar `206`.
 4. Si el paso 1 da `502 UPSTREAM_FORBIDDEN` o `503 UPSTREAM_BLOCKED` de forma persistente, pon `PREVIEW_ENABLED=false` y revisa `retry403` y `urlIpFamily` en `preview_finished` y `preview_forbidden`. Si `urlIpFamily` es `6`, prueba con `YTDLP_ARGS_PREFIX='["--force-ipv4"]'` y `NODE_OPTIONS=--dns-result-order=ipv4first`.
+5. Video: el master debe dar `200` con `#EXTM3U` y una línea `#EXT-X-STREAM-INF` por calidad:
+
+   ```powershell
+   curl.exe -s "https://api-setube.sebxstt.dev/api/videos/jNQXAC9IVRw/hls/master.m3u8?sid=00000000000000000000000000000000" -H "Referer: https://setube.sebxstt.dev/"
+   ```
+
+   Si da `422 FORMAT_UNAVAILABLE`, ese video no tiene formatos avc1 o m4a; prueba con otro.
 
 ### Healthcheck y dominio
 
@@ -557,7 +604,7 @@ Railway no tiene Docker secrets, así que usa `YOUTUBE_COOKIES_JSON` como variab
 
 - Railway sale a internet con IPs de datacenter y YouTube puede responder «Sign in to confirm you're not a bot» (`UPSTREAM_BLOCKED`). El servicio `pot`, las cookies de una cuenta secundaria, un proxy (`YTDLP_PROXY`) y mantener yt-dlp al día lo mitigan, pero no lo eliminan (ver «Bloqueo de YouTube»).
 - El límite de 15 minutos por petición afecta sobre todo a los ZIP grandes. Bajar `MAX_ITEMS_PER_JOB` ayuda a que entren en ese tiempo.
-- Cada descarga sale completa por la red y Railway cobra el tráfico de salida. El audio que se escucha en la web también pasa por la API y cuenta como tráfico de salida.
+- Cada descarga sale completa por la red y Railway cobra el tráfico de salida. El audio que se escucha en la web también pasa por la API y cuenta como tráfico de salida, y el video mucho más (del orden de 1,5 a 5 Mbit/s entre 720p y 1080p). `PREVIEW_VIDEO_MAX_HEIGHT` limita ese gasto.
 - El corte de 15 minutos también afecta a la escucha, pero ahí no se nota: el navegador vuelve a pedir el audio con `Range` desde donde iba.
 - Puedes subir réplicas de la API sin cambiar nada: la cola, los jobs y el rate limit viven en Redis.
 
@@ -567,7 +614,8 @@ Railway no tiene Docker secrets, así que usa `YOUTUBE_COOKIES_JSON` como variab
 - Las IPs nunca se guardan en claro: se usa un hash con `IP_HASH_SALT`.
 - El servidor `pot` no tiene autenticación y solo debe ser accesible desde la red privada (compose sin puertos publicados, Railway sin dominio público).
 - No hay caché de archivos: cada descarga vuelve a convertir.
-- Si la conexión se corta, la descarga de una conversión empieza de cero (las descargas de `/file` y `/archive` no admiten `Range`; la ruta de audio sí).
+- Si la conexión se corta, la descarga de una conversión empieza de cero (las descargas de `/file` y `/archive` no admiten `Range`; las rutas de audio y de video sí).
+- El video en streaming no admite directos y llega como máximo a 1080p en avc1 (sin VP9 ni AV1).
 - Las cookies solo entran por archivo secreto o variable de entorno, nunca en el código ni en la imagen.
 - Los cambios de YouTube (SABR, PO tokens) pueden romper descargas hasta actualizar yt-dlp.
 

@@ -33,9 +33,12 @@ export const indexKey = (videoId: string, formatId: string, size: number) => `pv
 const INITIAL_BYTES = 64 * 1024;
 const MAX_BYTES = 1024 * 1024;
 
-// En Redis los segmentos van como [offset, size, start, duration, sap] para que el JSON ocupe poco
+// En Redis los segmentos van como [offset, size, start, duration, sap] para que el JSON ocupe poco.
+// sap = (starts_with_SAP ? 8 : 0) | SAP_type, así sobreviven los dos valores. La v1 (sin SAP_type si no había SAP)
+// se descarta y se recalcula.
+const VERSION = 2;
 type Stored = {
-  v: 1;
+  v: typeof VERSION;
   ct: string;
   size: number;
   initEnd: number;
@@ -45,18 +48,18 @@ type Stored = {
   seg: [number, number, number, number, number][];
 };
 
-const SAP_NONE = -1;
+const SAP_FLAG = 8;
 
 function encode(ix: SegmentIndex): string {
   const stored: Stored = {
-    v: 1,
+    v: VERSION,
     ct: ix.contentType,
     size: ix.size,
     initEnd: ix.initEnd,
     sidxEnd: ix.sidxEnd,
     timescale: ix.timescale,
     ept: ix.earliestPresentationTime,
-    seg: ix.segments.map((s) => [s.offset, s.size, s.start, s.duration, s.startsWithSap ? s.sapType : SAP_NONE]),
+    seg: ix.segments.map((s) => [s.offset, s.size, s.start, s.duration, (s.startsWithSap ? SAP_FLAG : 0) | (s.sapType & 7)]),
   };
   return JSON.stringify(stored);
 }
@@ -71,13 +74,13 @@ function decode(raw: string, videoId: string, formatId: string, size: number): S
   } catch {
     return null;
   }
-  if (s.v !== 1 || s.size !== size || typeof s.ct !== 'string' || !Array.isArray(s.seg) || s.seg.length === 0) return null;
+  if (s.v !== VERSION || s.size !== size || typeof s.ct !== 'string' || !Array.isArray(s.seg) || s.seg.length === 0) return null;
   if (!safe(s.initEnd) || !safe(s.sidxEnd) || !safe(s.timescale) || s.timescale === 0 || !safe(s.ept)) return null;
   const segments: Mp4Segment[] = [];
   for (const r of s.seg) {
-    if (!Array.isArray(r) || r.length !== 5 || !r.slice(0, 4).every(safe) || typeof r[4] !== 'number') return null;
+    if (!Array.isArray(r) || r.length !== 5 || !r.every(safe) || r[4] > 15) return null;
     const [offset, len, start, duration, sap] = r;
-    segments.push({ offset, size: len, start, duration, startsWithSap: sap !== SAP_NONE, sapType: sap === SAP_NONE ? 0 : sap });
+    segments.push({ offset, size: len, start, duration, startsWithSap: (sap & SAP_FLAG) !== 0, sapType: sap & 7 });
   }
   return {
     videoId,

@@ -37,7 +37,7 @@ export function slimInfo(info: Json): Json {
 export function createInfoCache(metadata: Pick<MetadataService, 'readInfoJson' | 'refresh'>, opts: InfoCacheOptions = {}) {
   const ttlMs = opts.ttlMs ?? 60_000;
   const max = opts.max ?? 50;
-  const now = opts.now ?? Date.now;
+  const now = opts.now ?? (() => Date.now());
   const entries = new Map<string, { info: Json; until: number }>();
   const reading = new Map<string, Promise<Json | null>>();
   // Sube cada vez que se olvida o se refresca algún video: una lectura de Redis empezada antes no pisa el dato nuevo

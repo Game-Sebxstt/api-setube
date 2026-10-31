@@ -15,10 +15,12 @@ import { fakeMp4 } from './helpers/mp4.js';
 import { audioFormat, fakeFetch, fakeMeta, gvUrl, infoWith, nowSec, pattern, serve, status, videoFormat, type Call } from './helpers/upstream.js';
 
 const ID = 'jNQXAC9IVRw';
-const MEDIA = (formatId: string) => `/api/videos/${ID}/media/${formatId}`;
+const SID = 'b'.repeat(32);
+const MEDIA_PATH = (formatId: string) => `/api/videos/${ID}/media/${formatId}`;
+// El sid es obligatorio en /media (los playlists HLS siempre lo propagan)
+const MEDIA = (formatId: string) => `${MEDIA_PATH(formatId)}?sid=${SID}`;
 const AUDIO = `/api/videos/${ID}/audio`;
 const MiB = 1024 * 1024;
-const SID = 'b'.repeat(32);
 
 type Line = Record<string, unknown> & { msg: string };
 
@@ -140,7 +142,7 @@ describe('GET /api/videos/:videoId/media/:formatId: respuestas', () => {
   it('206 con los bytes exactos, video/mp4, ETag por formato y CORS que expone los rangos', async () => {
     const { app, data, log } = await make();
     const port = await listen(app);
-    const r = await get(port, `${MEDIA('136')}?sid=${SID}`, { range: 'bytes=1000-1999', origin: ORIGIN });
+    const r = await get(port, MEDIA('136'), { range: 'bytes=1000-1999', origin: ORIGIN });
     expect(r.status).toBe(206);
     expect(r.headers).toMatchObject({
       'content-type': 'video/mp4',
@@ -234,15 +236,20 @@ describe('GET /api/videos/:videoId/media/:formatId: validación y límites', () 
     expect((await get(port, MEDIA('136'), { range: 'bytes=0-0' })).status).toBe(206);
   });
 
-  it('formatId con forma inválida, parámetros extra o sid inválido → 400; HEAD → 404', async () => {
+  it('formatId con forma inválida, parámetros extra, sin sid o sid inválido → 400; HEAD → 404', async () => {
     const { app, f } = await make();
     for (const id of ['13_6', '13.6', 'a'.repeat(25), '%20', '136%2F..']) {
       const res = await app.inject({ method: 'GET', url: MEDIA(id) });
       expect(res.statusCode, id).toBe(400);
       expect(errCode(res)).toBe('INVALID_INPUT');
     }
-    for (const q of ['?codec=aac', '?foo=1', '?sid=xyz', `?sid=${'A'.repeat(32)}`]) {
+    for (const q of ['&codec=aac', '&foo=1']) {
       expect((await app.inject({ method: 'GET', url: MEDIA('136') + q })).statusCode, q).toBe(400);
+    }
+    for (const q of ['', '?sid=xyz', `?sid=${'A'.repeat(32)}`]) {
+      const res = await app.inject({ method: 'GET', url: MEDIA_PATH('136') + q, headers: { range: 'bytes=0-9' } });
+      expect(res.statusCode, q).toBe(400);
+      expect(errCode(res)).toBe('INVALID_INPUT');
     }
     expect((await app.inject({ method: 'GET', url: '/api/videos/corto/media/136' })).statusCode).toBe(400);
     expect((await app.inject({ method: 'HEAD', url: MEDIA('136') })).statusCode).toBe(404);
@@ -283,7 +290,7 @@ describe('GET /api/videos/:videoId/media/:formatId: validación y límites', () 
   it('tope por IP: leaseAcquire en 0 → 429 TOO_MANY_PREVIEWS con el sid como miembro', async () => {
     const redis = { ...leaseHandlers(), setubeLeaseAcquire: vi.fn((..._a: unknown[]): unknown => 0) };
     const { app } = await make({ redis });
-    const res = await app.inject({ method: 'GET', url: `${MEDIA('136')}?sid=${SID}` });
+    const res = await app.inject({ method: 'GET', url: MEDIA('136') });
     expect(res.statusCode).toBe(429);
     expect(errCode(res)).toBe('TOO_MANY_PREVIEWS');
     expect(res.headers['cache-control']).toBe('no-store');
@@ -296,10 +303,10 @@ describe('GET /api/videos/:videoId/media/:formatId: conexiones por reproductor',
     const { app, log } = await make({ data: pattern(40 * MiB) });
     const port = await listen(app);
     const opened = [];
-    for (let i = 0; i < 6; i++) opened.push(await openPaused(port, `${MEDIA(i % 2 ? '140' : '136')}?sid=${SID}`));
+    for (let i = 0; i < 6; i++) opened.push(await openPaused(port, MEDIA(i % 2 ? '140' : '136')));
     await new Promise((r) => setTimeout(r, 100));
     expect(log.finished()).toHaveLength(0);
-    opened.push(await openPaused(port, `${MEDIA('134')}?sid=${SID}`));
+    opened.push(await openPaused(port, MEDIA('134')));
     await waitFor(() => log.finished().length === 1);
     expect(log.finished()[0]).toMatchObject({ kind: 'media', outcome: 'superseded', conns: 1, formatId: '136' });
     for (const o of opened) o.req.destroy();
@@ -310,7 +317,7 @@ describe('GET /api/videos/:videoId/media/:formatId: conexiones por reproductor',
     const redis = leaseHandlers();
     const { app, log } = await make({ redis, tuning: { mediaLeaseGraceMs: 300 } });
     for (let i = 0; i < 5; i++) {
-      const res = await app.inject({ method: 'GET', url: `${MEDIA('136')}?sid=${SID}`, headers: { range: `bytes=${i * 1000}-${i * 1000 + 999}` } });
+      const res = await app.inject({ method: 'GET', url: MEDIA('136'), headers: { range: `bytes=${i * 1000}-${i * 1000 + 999}` } });
       expect(res.statusCode).toBe(206);
     }
     expect(log.finished()).toHaveLength(5);
@@ -323,7 +330,7 @@ describe('GET /api/videos/:videoId/media/:formatId: conexiones por reproductor',
   it('cerrar la app suelta en el acto el hueco en gracia', async () => {
     const redis = leaseHandlers();
     const { app } = await make({ redis });
-    expect((await app.inject({ method: 'GET', url: `${MEDIA('136')}?sid=${SID}`, headers: { range: 'bytes=0-999' } })).statusCode).toBe(206);
+    expect((await app.inject({ method: 'GET', url: MEDIA('136'), headers: { range: 'bytes=0-999' } })).statusCode).toBe(206);
     expect(redis.setubeLeaseRelease).not.toHaveBeenCalled();
     apps.splice(apps.indexOf(app), 1);
     await app.close();
@@ -334,7 +341,7 @@ describe('GET /api/videos/:videoId/media/:formatId: conexiones por reproductor',
     const redis = leaseHandlers();
     const { app, log } = await make({ redis, data: pattern(40 * MiB), tuning: { mediaLeaseGraceMs: 100 } });
     const port = await listen(app);
-    const a = await openPaused(port, `${MEDIA('136')}?sid=${SID}`);
+    const a = await openPaused(port, MEDIA('136'));
     const b = await openPaused(port, `${AUDIO}?sid=${SID}`);
     expect(redis.setubeLeaseAcquire).toHaveBeenCalledTimes(1);
     a.req.destroy();

@@ -19,7 +19,17 @@ export interface FakeMp4 {
  * Archivo con `fragments` fragmentos de `fragmentSize` bytes y `duration` unidades cada uno (timescale 15360).
  * `moovBytes` agranda el moov para forzar lecturas de más de 64 KiB; `trailer` añade bytes al final (mfra).
  */
-export function fakeMp4(o: { fragments?: number; fragmentSize?: number; duration?: number; moovBytes?: number; trailer?: number } = {}): FakeMp4 {
+export function fakeMp4(
+  o: {
+    fragments?: number;
+    fragmentSize?: number;
+    duration?: number | ((i: number) => number);
+    moovBytes?: number;
+    trailer?: number;
+    /** Tercera palabra de cada referencia del sidx (starts_with_SAP, SAP_type, SAP_delta_time); por defecto SAP tipo 1. */
+    sap?: (i: number) => number;
+  } = {},
+): FakeMp4 {
   const n = o.fragments ?? 5;
   const fragmentSize = o.fragmentSize ?? 4000;
   const duration = o.duration ?? 30720;
@@ -36,8 +46,8 @@ export function fakeMp4(o: { fragments?: number; fragmentSize?: number; duration
   const refs = Buffer.alloc(n * 12);
   for (let i = 0; i < n; i++) {
     refs.writeUInt32BE(fragmentSize, i * 12);
-    refs.writeUInt32BE(duration, i * 12 + 4);
-    refs.writeUInt32BE(0x90000000, i * 12 + 8);
+    refs.writeUInt32BE(typeof duration === 'function' ? duration(i) : duration, i * 12 + 4);
+    refs.writeUInt32BE(o.sap ? o.sap(i) >>> 0 : 0x90000000, i * 12 + 8);
   }
   const sidx = box('sidx', Buffer.concat([head, refs]));
   const initEnd = ftyp.length + moov.length;

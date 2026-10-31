@@ -88,6 +88,30 @@ describe('createSegmentIndex', () => {
     expect(second.index.stats).toMatchObject({ builds: 0, redisHits: 1 });
   });
 
+  it('starts_with_SAP y SAP_type sobreviven a Redis, también en un fragmento sin SAP', async () => {
+    // Fragmento 2 sin SAP (SAP_type 3), fragmento 3 con SAP tipo 2; el resto, SAP tipo 1
+    const mp4 = fakeMp4({ fragments: 5, sap: (i) => (i === 2 ? 0x30000000 : i === 3 ? 0xa0000000 : 0x90000000) });
+    const store = new Map<string, string>();
+    const built = await setup({ data: mp4.data, store }).index.get(ID, '136');
+    expect(built.segments.map((s) => [s.startsWithSap, s.sapType])).toEqual([[true, 1], [true, 1], [false, 3], [true, 2], [true, 1]]);
+    const second = setup({ data: mp4.data, store });
+    const read = await second.index.get(ID, '136');
+    expect(second.index.stats).toMatchObject({ builds: 0, redisHits: 1 });
+    expect(read).toEqual(built);
+  });
+
+  it('un índice de la versión anterior (v1) en Redis se descarta y se recalcula', async () => {
+    const mp4 = fakeMp4({ fragments: 2 });
+    const [a, b] = mp4.fragments as [[number, number], [number, number]];
+    const v1 = { v: 1, ct: 'video/mp4', size: mp4.data.length, initEnd: mp4.initEnd, sidxEnd: mp4.sidxEnd, timescale: 15360, ept: 0, seg: [[...a, 0, 30720, 1], [...b, 30720, 30720, -1]] };
+    const store = new Map([[indexKey(ID, '136', mp4.data.length), JSON.stringify(v1)]]);
+    const t = setup({ data: mp4.data, store });
+    const ix = await t.index.get(ID, '136');
+    expect(t.index.stats).toMatchObject({ builds: 1, redisHits: 0 });
+    expect(ix.segments.every((s) => s.startsWithSap && s.sapType === 1)).toBe(true);
+    expect(JSON.parse(store.get(indexKey(ID, '136', mp4.data.length)) as string)).toMatchObject({ v: 2 });
+  });
+
   it('un valor corrupto en Redis se ignora y se recalcula', async () => {
     const mp4 = fakeMp4();
     const store = new Map([[indexKey(ID, '136', mp4.data.length), '{"v":1,"seg":"x"}']]);

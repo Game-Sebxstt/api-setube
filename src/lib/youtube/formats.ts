@@ -382,6 +382,20 @@ export function previewAudioSource(info: Record<string, unknown>): Source | null
   return first && first.contentType === 'audio/mp4' ? first : null;
 }
 
+export interface AudioRendition extends Source {
+  acodec: string;
+  abr: number | null;
+}
+
+// El mismo m4a que previewAudioSource, con el códec y el bitrate para el grupo de audio del master HLS
+export function previewAudioRendition(info: Record<string, unknown>): AudioRendition | null {
+  const src = previewAudioSource(info);
+  if (!src) return null;
+  const formats = Array.isArray(info.formats) ? info.formats.filter(isObj) : [];
+  const raw = formats.find((f) => str(f.format_id) === src.formatId && f.url === src.url);
+  return { ...src, acodec: str(raw?.acodec), abr: num(raw?.abr) ?? num(raw?.tbr) };
+}
+
 const ZIP64_THRESHOLD = 3.5 * 2 ** 30;
 
 export function forceZip64(format: OutputFormat, estimatedTotal: number | null): boolean {

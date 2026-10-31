@@ -111,6 +111,24 @@ describe('createPreviewLeases', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('una renovación en curso que vuelve en false después de soltar no vuelve a ocupar el hueco', async () => {
+    vi.useFakeTimers();
+    const l = luaFake();
+    let answer: (v: number) => void = () => undefined;
+    const handlers = { ...l.handlers, setubeLeaseRenew: vi.fn(() => new Promise<number>((r) => (answer = r))) };
+    const leases = createPreviewLeases(fakeRedis(handlers), { maxPerIp: 4, renewMs: 100, warn: vi.fn() });
+    const lease = await leases.acquire('h', 'sid', conn('a'));
+    await vi.advanceTimersByTimeAsync(100);
+    expect(handlers.setubeLeaseRenew).toHaveBeenCalledTimes(1);
+    await lease.release();
+    expect(l.release).toHaveBeenCalledTimes(1);
+    // El lease había caducado en Redis (renovación tardía): la respuesta llega después del release
+    answer(0);
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    expect(l.acquire).toHaveBeenCalledTimes(1);
+    expect(l.sets.get('pv:ips:h')?.size ?? 0).toBe(0);
+  });
+
   it('Redis caído al adquirir deja pasar y avisa', async () => {
     const warn = vi.fn();
     const leases = createPreviewLeases(fakeRedis({}), { maxPerIp: 1, warn });

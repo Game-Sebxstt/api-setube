@@ -3,9 +3,10 @@ import type { FastifyInstance } from 'fastify';
 import { ipHash } from '../../src/lib/ip.js';
 import { pvIpsKey } from '../../src/lib/preview/leases.js';
 import type { MetadataService } from '../../src/lib/youtube/metadata.js';
+import { fakeMp4 } from '../unit/helpers/mp4.js';
 import { audioFormat, fakeFetch, fakeMeta, infoWith, pattern, serve, videoFormat } from '../unit/helpers/upstream.js';
 import { buildTestApp } from './helpers/app.js';
-import { createTestRedis, type TestRedis } from './helpers/redis.js';
+import { countKeys, createTestRedis, type TestRedis } from './helpers/redis.js';
 
 const URL_ = '/api/videos/jNQXAC9IVRw/audio';
 let t: TestRedis;
@@ -31,6 +32,9 @@ function deps(size = 5000) {
 }
 
 const MEDIA = '/api/videos/jNQXAC9IVRw/media/136';
+// /media exige el sid del reproductor
+const SID3 = '3'.repeat(32);
+const MEDIA_S = `${MEDIA}?sid=${SID3}`;
 
 // Video 720p sin audio y el m4a, del mismo tamaño (los dos salen de `data`)
 function videoDeps(size = 50_000) {
@@ -81,22 +85,23 @@ describe('ruta de audio con Redis real', () => {
     const d = videoDeps();
     const built = await buildTestApp(t, { deps: d });
     app = built.app;
-    const partial = await app.inject({ method: 'GET', url: `${MEDIA}?sid=${'3'.repeat(32)}`, headers: { range: 'bytes=4000-4999' } });
+    const partial = await app.inject({ method: 'GET', url: MEDIA_S, headers: { range: 'bytes=4000-4999' } });
     expect(partial.statusCode).toBe(206);
     expect(partial.headers['content-type']).toBe('video/mp4');
     expect(partial.headers['content-range']).toBe(`bytes 4000-4999/${d.data.length}`);
     expect(partial.rawPayload.equals(d.data.subarray(4000, 5000))).toBe(true);
-    const full = await app.inject({ method: 'GET', url: MEDIA });
+    const full = await app.inject({ method: 'GET', url: MEDIA_S });
     expect(full.statusCode).toBe(200);
     expect(full.rawPayload.equals(d.data)).toBe(true);
-    const out = await app.inject({ method: 'GET', url: MEDIA, headers: { range: `bytes=${d.data.length}-` } });
+    const out = await app.inject({ method: 'GET', url: MEDIA_S, headers: { range: `bytes=${d.data.length}-` } });
     expect(out.statusCode).toBe(416);
     expect(out.headers['content-range']).toBe(`bytes */${d.data.length}`);
-    expectError(await app.inject({ method: 'GET', url: '/api/videos/jNQXAC9IVRw/media/251' }), 404, 'FORMAT_UNAVAILABLE');
+    expectError(await app.inject({ method: 'GET', url: `/api/videos/jNQXAC9IVRw/media/251?sid=${SID3}` }), 404, 'FORMAT_UNAVAILABLE');
+    expectError(await app.inject({ method: 'GET', url: MEDIA }), 400, 'INVALID_INPUT');
     await new Promise((r) => setTimeout(r, 50));
-    // Sin sid se suelta en el acto; el reproductor con sid conserva su hueco (gracia) hasta que se cierra la app
+    // Todas las peticiones son del mismo reproductor: un solo hueco, que conserva (gracia) hasta que se cierra la app
     const key = pvIpsKey(ipHash('127.0.0.1', built.config.ipHashSalt));
-    expect(await t.redis.zrange(key, 0, -1)).toEqual([`s:${'3'.repeat(32)}`]);
+    expect(await t.redis.zrange(key, 0, -1)).toEqual([`s:${SID3}`]);
     await app.close();
     expect(await t.redis.zcard(key)).toBe(0);
   });
@@ -125,9 +130,9 @@ describe('ruta de audio con Redis real', () => {
       env: { PREVIEW_SEGMENT_RATE_LIMIT_MAX: '2', PREVIEW_RATE_LIMIT_MAX: '1', PREVIEW_VIDEO_ENABLED: 'false', CORS_ORIGINS: 'https://setube.example' },
       deps: videoDeps(),
     }));
-    expectError(await app.inject({ method: 'GET', url: MEDIA }), 503, 'SERVICE_UNAVAILABLE');
-    expectError(await app.inject({ method: 'GET', url: MEDIA }), 503, 'SERVICE_UNAVAILABLE');
-    const limited = await app.inject({ method: 'GET', url: MEDIA });
+    expectError(await app.inject({ method: 'GET', url: MEDIA_S }), 503, 'SERVICE_UNAVAILABLE');
+    expectError(await app.inject({ method: 'GET', url: MEDIA_S }), 503, 'SERVICE_UNAVAILABLE');
+    const limited = await app.inject({ method: 'GET', url: MEDIA_S });
     expectError(limited, 429, 'RATE_LIMITED');
     expect(limited.headers['retry-after']).toBeDefined();
     // /audio tiene su propio contador: la primera petición pasa aunque /media esté agotado
@@ -140,7 +145,7 @@ describe('ruta de audio con Redis real', () => {
   it('/media no consume el rate limit global (RATE_LIMIT_MAX): cada segmento es una petición', async () => {
     ({ app } = await buildTestApp(t, { env: { RATE_LIMIT_MAX: '2', PREVIEW_SEGMENT_RATE_LIMIT_MAX: '50' }, deps: videoDeps() }));
     for (let i = 0; i < 10; i++) {
-      const res = await app.inject({ method: 'GET', url: MEDIA, headers: { range: `bytes=${i * 100}-${i * 100 + 99}` } });
+      const res = await app.inject({ method: 'GET', url: MEDIA_S, headers: { range: `bytes=${i * 100}-${i * 100 + 99}` } });
       expect(res.statusCode).toBe(206);
     }
   });
@@ -181,5 +186,77 @@ describe('ruta de audio con Redis real', () => {
     const second = await app.inject({ method: 'GET', url: `${URL_}?sid=${'2'.repeat(32)}` });
     expectError(second, 429, 'TOO_MANY_PREVIEWS');
     held.destroy();
+  });
+});
+
+// Playlists HLS del video en streaming sobre MP4 fragmentados sintéticos (ftyp + moov + sidx + fragmentos)
+function hlsDeps() {
+  const files: Record<string, ReturnType<typeof fakeMp4>> = {
+    '136': fakeMp4({ fragments: 9, fragmentSize: 4000 }),
+    '140': fakeMp4({ fragments: 2, fragmentSize: 2500, duration: 15360 * 9 }),
+  };
+  const info = infoWith([videoFormat('136', 720, files['136']!.data.length), audioFormat('140', files['140']!.data.length)]);
+  const metadata = {
+    get: async () => fakeMeta({ duration: 18 }),
+    readInfoJson: async () => info,
+    refresh: async () => ({ meta: fakeMeta(), infoJson: info }),
+  } as unknown as MetadataService;
+  const f = fakeFetch((c) => serve(files[new URL(c.url).searchParams.get('itag') ?? '']!.data, c, { contentType: 'video/mp4' }));
+  return { files, calls: f.calls, deps: { fetch: f.fetch, youtube: { metadata }, preview: { retryDelayMs: 0, retryJitterMs: 0 } } };
+}
+
+const HLS = '/api/videos/jNQXAC9IVRw/hls';
+
+describe('playlists HLS con Redis real', () => {
+  it('master → media playlist → init y segmentos por /media; el índice queda en Redis para otra instancia', async () => {
+    const h = hlsDeps();
+    ({ app } = await buildTestApp(t, { deps: h.deps }));
+    const master = await app.inject({ method: 'GET', url: `${HLS}/master.m3u8?sid=${SID3}` });
+    expect(master.statusCode).toBe(200);
+    expect(master.headers['content-type']).toBe('application/vnd.apple.mpegurl');
+    expect(master.body).toContain(`URI="140.m3u8?sid=${SID3}"`);
+    expect(master.body).toContain(`\n136.m3u8?sid=${SID3}\n`);
+    // El precalentado deja los dos índices en Redis
+    const until = Date.now() + 3000;
+    while ((await countKeys(t, 'pv:idx:*')) < 2 && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
+    expect(await countKeys(t, 'pv:idx:*')).toBe(2);
+
+    for (const id of ['136', '140']) {
+      const pl = await app.inject({ method: 'GET', url: `${HLS}/${id}.m3u8?sid=${SID3}` });
+      expect(pl.statusCode).toBe(200);
+      expect(pl.body.startsWith('#EXTM3U\n')).toBe(true);
+      expect(pl.body.endsWith('#EXT-X-ENDLIST\n')).toBe(true);
+      const ranges = [...pl.body.matchAll(/BYTERANGE[:=]"?(\d+)@(\d+)"?/g)].map((m) => [Number(m[1]), Number(m[2])] as const);
+      const parts: Buffer[] = [];
+      for (const [len, off] of ranges) {
+        const res = await app.inject({ method: 'GET', url: `/api/videos/jNQXAC9IVRw/media/${id}?sid=${SID3}`, headers: { range: `bytes=${off}-${off + len - 1}` } });
+        expect(res.statusCode).toBe(206);
+        parts.push(res.rawPayload);
+      }
+      const file = h.files[id]!;
+      expect(Buffer.concat(parts).equals(Buffer.concat([file.data.subarray(0, file.initEnd), file.data.subarray(file.sidxEnd)]))).toBe(true);
+    }
+    const before = h.calls.length;
+    await app.close();
+
+    // Otra instancia (memoria vacía) saca el índice de Redis: los playlists no tocan googlevideo
+    const h2 = hlsDeps();
+    ({ app } = await buildTestApp(t, { deps: h2.deps }));
+    const again = await app.inject({ method: 'GET', url: `${HLS}/136.m3u8?sid=${SID3}` });
+    expect(again.statusCode).toBe(200);
+    expect(h2.calls).toHaveLength(0);
+    expect(before).toBeGreaterThan(0);
+  });
+
+  it('los playlists usan PREVIEW_SEGMENT_RATE_LIMIT_MAX: 429 RATE_LIMITED no-store con retry-after', async () => {
+    const h = hlsDeps();
+    ({ app } = await buildTestApp(t, { deps: h.deps, env: { PREVIEW_SEGMENT_RATE_LIMIT_MAX: '2', RATE_LIMIT_MAX: '1' } }));
+    for (let i = 0; i < 2; i++) expect((await app.inject({ method: 'GET', url: `${HLS}/136.m3u8?sid=${SID3}` })).statusCode).toBe(200);
+    const limited = await app.inject({ method: 'GET', url: `${HLS}/136.m3u8?sid=${SID3}` });
+    expectError(limited, 429, 'RATE_LIMITED');
+    expect(limited.headers['retry-after']).toBeDefined();
+    // El master tiene su propio contador y no gasta el global (RATE_LIMIT_MAX 1)
+    for (let i = 0; i < 2; i++) expect((await app.inject({ method: 'GET', url: `${HLS}/master.m3u8?sid=${SID3}` })).statusCode).toBe(200);
+    expectError(await app.inject({ method: 'GET', url: `${HLS}/master.m3u8?sid=${SID3}` }), 429, 'RATE_LIMITED');
   });
 });

@@ -125,6 +125,8 @@ export function createPreviewLeases(redis: Redis, o: PreviewLeaseOpts) {
       e.timer = setInterval(async () => {
         try {
           if (await s.leaseRenew(key, member, leaseMs)) return;
+          // Si el hueco se soltó mientras la renovación iba a Redis, no hay que volver a ocuparlo
+          if (entries.get(mapKey) !== e) return;
           // Se perdió (reinicio o expiración): un reintento; si otro ocupó el hueco se acepta el sobrecompromiso
           if (!(await s.leaseAcquire(key, member, leaseMs, o.maxPerIp))) o.warn('preview_lease_lost');
         } catch {
