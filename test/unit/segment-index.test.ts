@@ -57,6 +57,24 @@ describe('createSegmentIndex', () => {
     expect(t.index.stats).toMatchObject({ builds: 1 });
   });
 
+  it('sin tamaño en la info (ni filesize ni clen): pide la cabecera directamente, sin la sonda bytes=0-0', async () => {
+    const mp4 = fakeMp4({ fragments: 40, fragmentSize: 6000 });
+    const t = setup({ data: mp4.data, info: infoWith([videoFormat('136', 720, null), audioFormat('140', null)]) });
+    const ix = await t.index.get(ID, '136');
+    expect(t.f.calls.map((c) => c.range)).toEqual(['bytes=0-65535']);
+    expect(ix.size).toBe(mp4.data.length);
+    expect(ix.segments.map((s) => [s.offset, s.size])).toEqual(mp4.fragments);
+    expect(t.set).toHaveBeenCalledWith(indexKey(ID, '136', mp4.data.length), expect.any(String), 'EX', 3600);
+  });
+
+  it('sin tamaño en la info y archivo más pequeño que 64 KiB: el total sale del Content-Range', async () => {
+    const mp4 = fakeMp4({ fragments: 3, fragmentSize: 1000 });
+    const t = setup({ data: mp4.data, info: infoWith([videoFormat('136', 720, null), audioFormat('140', null)]) });
+    const ix = await t.index.get(ID, '136');
+    expect(t.f.calls.map((c) => c.range)).toEqual(['bytes=0-65535']);
+    expect(ix.size).toBe(mp4.data.length);
+  });
+
   it('archivo más pequeño que 64 KiB: pide solo hasta el final', async () => {
     const mp4 = fakeMp4({ fragments: 3, fragmentSize: 1000 });
     const t = setup({ data: mp4.data });

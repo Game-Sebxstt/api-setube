@@ -7,6 +7,7 @@ import { AppError, type ErrorCode } from '../errors.js';
 import { parseRange } from '../http/range.js';
 import { clientIp, ipHash } from '../ip.js';
 import { binaryHeaders } from '../jobs/stream-item.js';
+import type { MetadataService } from '../youtube/metadata.js';
 import { createDeadline, withDeadline } from './deadline.js';
 import type { PreviewLease, PreviewLeases } from './leases.js';
 import type { SegmentIndexService } from './segment-index.js';
@@ -52,6 +53,8 @@ interface Preview extends PreviewConn {
   status: number;
   start: number;
   conns: number;
+  /** Milisegundos desde que llegó la petición hasta enviar las cabeceras (null si acabó en error antes). */
+  ttfbMs: number | null;
 }
 
 export interface PreviewProxyDeps {
@@ -60,6 +63,8 @@ export interface PreviewProxyDeps {
   session: SessionDeps;
   /** Índice de segmentos: /media lo invalida si ve otro tamaño o el formato deja de estar disponible. */
   index?: SegmentIndexService;
+  /** De dónde sale la meta (directo, duración); por defecto `app.yt.metadata`. */
+  meta?: Pick<MetadataService, 'get'>;
 }
 
 const QUIET = new Set<Outcome>(['client_closed', 'idle', 'superseded']);
@@ -115,6 +120,7 @@ export function createPreviewProxy(app: FastifyInstance, d: PreviewProxyDeps) {
       status: 0,
       start: 0,
       conns: 0,
+      ttfbMs: null,
     };
     active.add(pv);
     const deadline = createDeadline(tuning.deadlineMs ?? 60_000);
@@ -137,6 +143,8 @@ export function createPreviewProxy(app: FastifyInstance, d: PreviewProxyDeps) {
         start: pv.start,
         bytes: s?.bytes ?? 0,
         ms: Date.now() - startedAt,
+        // Sobrecarga del servidor: hasta enviar las cabeceras (hooks, lease, meta, sesión y apertura de googlevideo)
+        ttfbMs: pv.ttfbMs,
         outcome,
         code: pv.code,
         refreshed: s?.refreshed ?? false,
@@ -180,14 +188,16 @@ export function createPreviewProxy(app: FastifyInstance, d: PreviewProxyDeps) {
       pv.lease = lease;
       pv.conns = lease.conns;
 
-      const meta = await withDeadline(app.yt.metadata.get(videoId), deadline, signal);
+      const meta = await withDeadline((d.meta ?? app.yt.metadata).get(videoId), deadline, signal);
       if (meta.live) throw new AppError('LIVE_NOT_SUPPORTED');
       if (meta.duration > config.maxDurationAudioSec) throw new AppError('LIMIT_DURATION');
 
       const s = createSession(d.session, videoId, o.selector, signal);
       session = s;
       pv.stats = s.stats;
-      await withDeadline(s.prepare(deadline), deadline, signal);
+      // Sin tamaño en la info, el del índice (sacado del Content-Range) ahorra la sonda bytes=0-0 en cada segmento
+      const sizeHint = kind === 'media' && d.index && requested ? (d.index.peek(videoId, requested)?.size ?? null) : null;
+      await withDeadline(s.prepare(deadline, { sizeHint }), deadline, signal);
 
       let range = parseRange(req.headers.range, s.total);
       if (range === 'invalid') throw new AppError('INVALID_INPUT', RANGE_416);
@@ -235,6 +245,8 @@ export function createPreviewProxy(app: FastifyInstance, d: PreviewProxyDeps) {
       'Content-Disposition': 'inline',
     };
     res.writeHead(pv.status, headers);
+    // Desde que llegó la petición: incluye el rate limit y el resto de hooks, no solo este manejador
+    pv.ttfbMs = Math.round(reply.elapsedTime);
 
     const idleTimeoutMs = tuning.idleTimeoutMs ?? config.previewIdleTimeoutMs;
     const upstreamIdleMs = tuning.upstreamIdleMs ?? 20_000;

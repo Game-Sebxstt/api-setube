@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
-import { createInfoCache, slimInfo } from '../../src/lib/preview/info-cache.js';
+import { createInfoCache, createMetaCache, slimInfo } from '../../src/lib/preview/info-cache.js';
 import { audioFormat, fakeMeta, infoWith, videoFormat } from './helpers/upstream.js';
 
 const ID = 'jNQXAC9IVRw';
@@ -43,6 +43,26 @@ describe('createInfoCache', () => {
     expect(metadata.readInfoJson).toHaveBeenCalledTimes(1);
     expect(a).toBe(b);
     expect(b).toBe(d);
+  });
+
+  it('createMetaCache: memoriza ~15 s, comparte lecturas simultáneas y no guarda errores', async () => {
+    const t = { now: 0 };
+    const get = vi.fn(async (id: string) => fakeMeta({ videoId: id }));
+    const c = createMetaCache({ get } as never, { now: () => t.now });
+    const [a, b] = await Promise.all([c.get(ID), c.get(ID)]);
+    expect(b).toBe(a);
+    expect(await c.get(ID)).toBe(a);
+    expect(get).toHaveBeenCalledTimes(1);
+    t.now = 14_999;
+    await c.get(ID);
+    expect(get).toHaveBeenCalledTimes(1);
+    t.now = 15_000;
+    await c.get(ID);
+    expect(get).toHaveBeenCalledTimes(2);
+    get.mockRejectedValueOnce(new Error('caído'));
+    await expect(c.get('otro_video_')).rejects.toThrow('caído');
+    expect((await c.get('otro_video_')).videoId).toBe('otro_video_');
+    expect(get).toHaveBeenCalledTimes(4);
   });
 
   it('caduca a los ~60 s', async () => {

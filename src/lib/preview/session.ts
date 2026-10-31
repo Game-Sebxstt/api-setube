@@ -19,6 +19,20 @@ export interface SessionDeps extends UpstreamDeps {
   availableWaitMs?: number;
 }
 
+export interface PrepareOptions {
+  /**
+   * Tamaño ya conocido del archivo (p. ej. el del índice de segmentos, sacado de un Content-Range) para cuando la info
+   * no trae `filesize` ni `clen`: evita la sonda `bytes=0-0`. Si googlevideo dice otro, la sesión lo trata como un
+   * cambio de archivo, igual que con el tamaño de la info.
+   */
+  sizeHint?: number | null;
+  /**
+   * false: sin tamaño conocido no se hace la sonda; el total sale del Content-Range de la primera apertura, que tiene
+   * que ser un rango explícito con `end` (lo usa el índice, que siempre pide la cabecera).
+   */
+  probe?: boolean;
+}
+
 export const forbiddenKey = (videoId: string, formatId: string) => `pv:forbidden:${videoId}:${formatId}`;
 const FORBIDDEN_TTL_SEC = 120;
 const SAME_MIN_LEFT_SEC = 300;
@@ -152,7 +166,7 @@ export function createSession(d: SessionDeps, videoId: string, selector: SourceS
     return markForbidden(phase);
   }
 
-  async function prepare(deadline: Deadline): Promise<void> {
+  async function prepare(deadline: Deadline, opts: PrepareOptions = {}): Promise<void> {
     const signal = AbortSignal.any([sessionSignal, deadline.signal]);
     let info = await d.metadata.readInfoJson(videoId);
     if (!info) {
@@ -172,8 +186,8 @@ export function createSession(d: SessionDeps, videoId: string, selector: SourceS
       if (waitMs > 0) await sleep(waitMs, signal);
       if (signal.aborted) throw abortedError(deadline);
     }
-    total = s.size;
-    if (total === null) {
+    total = s.size ?? (opts.sizeHint && opts.sizeHint > 0 ? opts.sizeHint : null);
+    if (total === null && opts.probe !== false) {
       const probe = await openPre(0, 0, true, deadline);
       probe.opened.body.cancel().catch(() => undefined);
       total = probe.opened.total;
@@ -239,14 +253,16 @@ export function createSession(d: SessionDeps, videoId: string, selector: SourceS
   }
 
   async function openFirst(range: ByteRange | null, deadline: Deadline): Promise<{ opened: Opened; start: number; end: number }> {
-    const before = total as number;
+    // null solo con prepare({ probe: false }): entonces hay un rango explícito y el total sale de esta apertura
+    const before = total;
     const start = range?.start ?? 0;
-    let end = range?.end ?? before - 1;
+    let end = range?.end ?? (before ?? 0) - 1;
     const fromZero = start === 0 && !range?.suffix;
     const { opened, changed } = await openPre(start, end, fromZero, deadline);
     if (changed || opened.total !== before) {
       total = opened.total;
-      end = range === null || end >= before - 1 ? opened.total - 1 : Math.min(end, opened.total - 1);
+      const toEnd = range === null || (before !== null && end >= before - 1);
+      end = toEnd ? opened.total - 1 : Math.min(end, opened.total - 1);
     }
     return { opened, start, end };
   }

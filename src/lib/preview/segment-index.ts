@@ -150,7 +150,8 @@ export function createSegmentIndex(d: SegmentIndexDeps) {
     const deadline = createDeadline(d.deadlineMs ?? 20_000);
     const s = createSession(d.session, videoId, { formatId, maxHeight: d.maxHeight }, ac.signal);
     try {
-      await withDeadline(s.prepare(deadline), deadline, ac.signal);
+      // Sin tamaño en la info, el total sale del Content-Range de la cabecera: sin sonda bytes=0-0 previa
+      await withDeadline(s.prepare(deadline, { probe: false }), deadline, ac.signal);
       // Con el tamaño de la info (filesize/clen) el índice puede salir de Redis sin tocar googlevideo
       const known = s.total;
       if (known > 0) {

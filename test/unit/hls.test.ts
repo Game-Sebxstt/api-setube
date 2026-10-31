@@ -6,6 +6,7 @@ import {
   mediaPlaylist,
   mediaPlaylistUri,
   mediaUri,
+  TARGET_SEGMENT_SEC,
   type MasterInput,
 } from '../../src/lib/preview/hls.js';
 import type { Mp4Segment } from '../../src/lib/preview/mp4-index.js';
@@ -90,14 +91,22 @@ describe('masterPlaylist', () => {
 });
 
 describe('groupSegments', () => {
-  it('fragmentos de 2 s se agrupan en segmentos de 6 s; el último se queda con lo que sobra', () => {
-    const g = groupSegments(ix(frags([2, 2, 2, 2, 2, 2, 2, 2])));
+  it('por defecto el objetivo es de 4 s: fragmentos de 2 s van de dos en dos', () => {
+    expect(TARGET_SEGMENT_SEC).toBe(4);
+    const g = groupSegments(ix(frags([2, 2, 2, 2, 2, 2, 2])));
+    expect(g.map((s) => s.duration)).toEqual([4, 4, 4, 2]);
+    expect(g.map((s) => [s.offset, s.size])).toEqual([[1000, 2000], [3000, 2000], [5000, 2000], [7000, 1000]]);
+    expect(g.every((s) => s.independent)).toBe(true);
+  });
+
+  it('con un objetivo de 6 s, fragmentos de 2 s van de tres en tres; el último se queda con lo que sobra', () => {
+    const g = groupSegments(ix(frags([2, 2, 2, 2, 2, 2, 2, 2])), 6);
     expect(g.map((s) => s.duration)).toEqual([6, 6, 4]);
     expect(g.map((s) => [s.offset, s.size])).toEqual([[1000, 3000], [4000, 3000], [7000, 2000]]);
     expect(g.every((s) => s.independent)).toBe(true);
   });
 
-  it('fragmentos de ~5,3 s (los de YouTube) no se juntan: pasarían de 9 s', () => {
+  it('fragmentos de ~5,3 s (los de YouTube) no se juntan: cada uno ya pasa del objetivo', () => {
     expect(groupSegments(ix(frags([5.339, 5.339, 5.339]))).map((s) => s.duration.toFixed(3))).toEqual(['5.339', '5.339', '5.339']);
   });
 
@@ -106,8 +115,9 @@ describe('groupSegments', () => {
   });
 
   it('un fragmento que no empieza en keyframe se une al anterior aunque pase del objetivo', () => {
-    const g = groupSegments(ix(frags([4, 2, 2, 2, 2], { sap: (i) => i !== 2 })));
-    expect(g.map((s) => s.duration)).toEqual([8, 4]);
+    // 2 + 2 llega al objetivo (4 s), pero el tercero no empieza en keyframe y tiene que ir con ellos
+    const g = groupSegments(ix(frags([2, 2, 2, 2], { sap: (i) => i !== 2 })));
+    expect(g.map((s) => s.duration)).toEqual([6, 2]);
     expect(g.every((s) => s.independent)).toBe(true);
   });
 
@@ -133,16 +143,16 @@ describe('mediaPlaylist', () => {
       [
         '#EXTM3U',
         '#EXT-X-VERSION:7',
-        '#EXT-X-TARGETDURATION:6',
+        '#EXT-X-TARGETDURATION:5',
         '#EXT-X-MEDIA-SEQUENCE:0',
         '#EXT-X-PLAYLIST-TYPE:VOD',
         '#EXT-X-INDEPENDENT-SEGMENTS',
         `#EXT-X-MAP:URI="../media/136?sid=${SID}",BYTERANGE="800@0"`,
-        '#EXTINF:6.00000,',
-        '#EXT-X-BYTERANGE:3000@1000',
+        '#EXTINF:4.00000,',
+        '#EXT-X-BYTERANGE:2000@1000',
         `../media/136?sid=${SID}`,
-        '#EXTINF:2.50000,',
-        '#EXT-X-BYTERANGE:1000@4000',
+        '#EXTINF:4.50000,',
+        '#EXT-X-BYTERANGE:2000@3000',
         `../media/136?sid=${SID}`,
         '#EXT-X-ENDLIST',
         '',

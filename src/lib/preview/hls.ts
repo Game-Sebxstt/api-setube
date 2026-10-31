@@ -7,7 +7,7 @@ import type { SegmentIndex } from './segment-index.js';
 
 export const HLS_CONTENT_TYPE = 'application/vnd.apple.mpegurl';
 /** Duración objetivo de cada segmento del playlist: se agrupan fragmentos consecutivos del sidx hasta llegar a ella. */
-export const TARGET_SEGMENT_SEC = 6;
+export const TARGET_SEGMENT_SEC = 4;
 // Un segmento no crece por encima de esto salvo que el siguiente fragmento no empiece en un keyframe
 const MAX_GROUP_FACTOR = 1.5;
 const AUDIO_GROUP = 'aud';

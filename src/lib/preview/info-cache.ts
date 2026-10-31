@@ -104,3 +104,46 @@ export function createInfoCache(metadata: Pick<MetadataService, 'readInfoJson' |
 }
 
 export type InfoCache = ReturnType<typeof createInfoCache>;
+
+type Meta = Awaited<ReturnType<MetadataService['get']>>;
+
+/**
+ * Caché en memoria corta de la meta por video (por defecto 15 s). Cada segmento del video en streaming vuelve a mirar
+ * si el video es un directo o pasa del límite de duración: sin esta caché cada uno leería y validaría la meta de Redis.
+ * Las lecturas simultáneas comparten la misma promesa; los errores no se guardan (la siguiente vuelve a preguntar).
+ * El objeto devuelto se comparte entre peticiones: no se debe modificar.
+ */
+export function createMetaCache(metadata: Pick<MetadataService, 'get'>, opts: InfoCacheOptions = {}) {
+  const ttlMs = opts.ttlMs ?? 15_000;
+  const max = opts.max ?? 100;
+  const now = opts.now ?? (() => Date.now());
+  const entries = new Map<string, { meta: Meta; until: number }>();
+  const reading = new Map<string, Promise<Meta>>();
+
+  return {
+    get(videoId: string): Promise<Meta> {
+      const e = entries.get(videoId);
+      if (e && e.until > now()) return Promise.resolve(e.meta);
+      if (e) entries.delete(videoId);
+      const running = reading.get(videoId);
+      if (running) return running;
+      const p = metadata.get(videoId).then((meta) => {
+        entries.delete(videoId);
+        entries.set(videoId, { meta, until: now() + ttlMs });
+        while (entries.size > max) entries.delete(entries.keys().next().value as string);
+        return meta;
+      });
+      const tracked = p.finally(() => {
+        if (reading.get(videoId) === tracked) reading.delete(videoId);
+      });
+      tracked.catch(() => undefined);
+      reading.set(videoId, tracked);
+      return tracked;
+    },
+    get size(): number {
+      return entries.size;
+    },
+  };
+}
+
+export type MetaCache = ReturnType<typeof createMetaCache>;

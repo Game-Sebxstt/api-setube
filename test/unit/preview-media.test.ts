@@ -62,6 +62,7 @@ interface Opts {
   redis?: Record<string, (...a: unknown[]) => unknown>;
   env?: Record<string, string>;
   tuning?: AppDeps['preview'];
+  info?: Record<string, unknown>;
 }
 
 const apps: FastifyInstance[] = [];
@@ -72,7 +73,7 @@ afterEach(async () => {
 async function make(o: Opts = {}) {
   const data = o.data ?? pattern(3 * MiB);
   const f = fakeFetch(o.handler ?? ((c) => serve(data, c, { contentType: 'video/mp4' })));
-  const info = fullInfo(data.length);
+  const info = o.info ?? fullInfo(data.length);
   const metadata = {
     get: vi.fn(async () => fakeMeta(o.meta)),
     readInfoJson: vi.fn(async () => info),
@@ -137,6 +138,48 @@ async function waitFor(fn: () => boolean, ms = 3000): Promise<void> {
 }
 
 const errCode = (res: { json(): unknown }) => (res.json() as { error: { code: string } }).error.code;
+
+describe('GET /api/videos/:videoId/media/:formatId: coste por segmento', () => {
+  it('segmentos seguidos: la meta se lee una vez y cada segmento abre googlevideo una sola vez', async () => {
+    const { app, f, metadata, log } = await make();
+    const port = await listen(app);
+    for (const range of ['bytes=0-999', 'bytes=1000-1999', 'bytes=2000-2999']) {
+      expect((await get(port, MEDIA('136'), { range })).status).toBe(206);
+    }
+    expect(metadata.get).toHaveBeenCalledTimes(1);
+    expect(metadata.readInfoJson).toHaveBeenCalledTimes(1);
+    expect(f.calls.map((c) => c.range)).toEqual(['bytes=0-999', 'bytes=1000-1999', 'bytes=2000-2999']);
+    await waitFor(() => log.finished().length === 3);
+    // ttfbMs: sobrecarga del servidor hasta las cabeceras
+    for (const l of log.finished()) expect(l.ttfbMs).toEqual(expect.any(Number));
+  });
+
+  it('sin tamaño en la info, el del índice evita la sonda bytes=0-0 en cada segmento', async () => {
+    const mp4 = fakeMp4({ fragments: 6, fragmentSize: 3000 });
+    const info = infoWith([videoFormat('134', 360, null), videoFormat('136', 720, null), audioFormat('140', null)]);
+    const { app, f } = await make({ data: mp4.data, info });
+    const port = await listen(app);
+    const pl = await get(port, `/api/videos/${ID}/hls/136.m3u8?sid=${SID}`);
+    expect(pl.status).toBe(200);
+    expect(f.calls.map((c) => c.range)).toEqual(['bytes=0-65535']);
+    const [offset, size] = mp4.fragments[2] as [number, number];
+    const range = `bytes=${offset}-${offset + size - 1}`;
+    const r = await get(port, MEDIA('136'), { range });
+    expect(r.status).toBe(206);
+    expect(r.headers['content-range']).toBe(`bytes ${offset}-${offset + size - 1}/${mp4.data.length}`);
+    expect(r.body.equals(mp4.data.subarray(offset, offset + size))).toBe(true);
+    expect(f.calls.map((c) => c.range)).toEqual(['bytes=0-65535', range]);
+  });
+
+  it('un error de la meta no se guarda: la siguiente petición vuelve a preguntar', async () => {
+    const { app, metadata } = await make({ data: pattern(100) });
+    metadata.get.mockRejectedValueOnce(new Error('redis caído'));
+    const port = await listen(app);
+    expect((await get(port, MEDIA('136'), { range: 'bytes=0-9' })).status).toBe(500);
+    expect((await get(port, MEDIA('136'), { range: 'bytes=0-9' })).status).toBe(206);
+    expect(metadata.get).toHaveBeenCalledTimes(2);
+  });
+});
 
 describe('GET /api/videos/:videoId/media/:formatId: respuestas', () => {
   it('206 con los bytes exactos, video/mp4, ETag por formato y CORS que expone los rangos', async () => {

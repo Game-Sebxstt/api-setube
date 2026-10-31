@@ -167,6 +167,28 @@ describe('GET /api/videos/:videoId/hls/master.m3u8', () => {
     }
   });
 
+  it('metadata colgada → 504 UPSTREAM_TIMEOUT no-store al vencer el plazo, en el master y en los playlists', async () => {
+    const { app, metadata } = await make({ tuning: { deadlineMs: 100 } });
+    metadata.get.mockImplementation(() => new Promise(() => undefined));
+    for (const url of [MASTER, PLAYLIST('136')]) {
+      const t0 = Date.now();
+      const res = await app.inject({ method: 'GET', url });
+      expect(res.statusCode, url).toBe(504);
+      expect(errCode(res)).toBe('UPSTREAM_TIMEOUT');
+      expect(res.headers['cache-control']).toBe('no-store');
+      expect(Date.now() - t0).toBeLessThan(2000);
+    }
+  });
+
+  it('master y playlists seguidos del mismo video leen la meta una sola vez', async () => {
+    const { app, metadata } = await make();
+    for (const url of [MASTER, PLAYLIST('136'), PLAYLIST('140'), PLAYLIST('134')]) {
+      expect((await app.inject({ method: 'GET', url })).statusCode, url).toBe(200);
+    }
+    expect(metadata.get).toHaveBeenCalledTimes(1);
+    expect(metadata.readInfoJson).toHaveBeenCalledTimes(1);
+  });
+
   it('sin sid, con sid inválido o con parámetros extra → 400; origen ajeno → 403; HEAD → 404', async () => {
     const { app, metadata } = await make();
     for (const q of ['', '?sid=xyz', `?sid=${SID}&codec=aac`]) {
@@ -195,8 +217,8 @@ describe('GET /api/videos/:videoId/hls/:formatId.m3u8', () => {
       expect(res.headers['cache-control']).toBe('private, max-age=600');
       expect(res.body).toBe(mediaPlaylist(indexOf(state.files[id]!, id), SID));
     }
-    // 9 fragmentos de 2 s → 3 segmentos de 6 s; el audio, 2 de 9 s
-    expect((await app.inject({ method: 'GET', url: PLAYLIST('136') })).body.match(/#EXTINF:6\.00000,/g)).toHaveLength(3);
+    // 9 fragmentos de 2 s → 4 segmentos de 4 s y uno de 2 s; el audio, 2 de 9 s
+    expect((await app.inject({ method: 'GET', url: PLAYLIST('136') })).body.match(/#EXTINF:4\.00000,/g)).toHaveLength(4);
     expect((await app.inject({ method: 'GET', url: PLAYLIST('140') })).body).toContain('#EXT-X-TARGETDURATION:9');
   });
 

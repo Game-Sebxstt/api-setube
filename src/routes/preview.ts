@@ -3,7 +3,8 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { Type } from 'typebox';
 import { AppError } from '../lib/errors.js';
 import { HLS_CONTENT_TYPE, masterPlaylist, mediaPlaylist, type HlsAudio, type HlsVariant } from '../lib/preview/hls.js';
-import { createInfoCache } from '../lib/preview/info-cache.js';
+import { createDeadline, withDeadline } from '../lib/preview/deadline.js';
+import { createInfoCache, createMetaCache } from '../lib/preview/info-cache.js';
 import { createPreviewLeases, MAX_CONNS_PER_PLAYER, MAX_MEDIA_CONNS_PER_PLAYER, MEDIA_LEASE_GRACE_MS } from '../lib/preview/leases.js';
 import { createPreviewProxy } from '../lib/preview/proxy.js';
 import { createSegmentIndex } from '../lib/preview/segment-index.js';
@@ -60,6 +61,8 @@ const previewRoute: FastifyPluginAsyncTypebox = async (app) => {
   });
   // Info JSON parseado en memoria (~60 s): las peticiones seguidas al mismo video no vuelven a leerlo y parsearlo de Redis
   const infoCache = createInfoCache(app.yt.metadata);
+  // Meta en memoria (~15 s): cada segmento comprueba directo y duración sin leer ni validar la meta de Redis
+  const metaCache = createMetaCache(app.yt.metadata);
   const sessionDeps: SessionDeps = {
     fetch: app.deps.upstreamFetch,
     chunkBytes: config.previewChunkBytes,
@@ -72,7 +75,7 @@ const previewRoute: FastifyPluginAsyncTypebox = async (app) => {
   };
   // Índice de segmentos por formato (para los playlists HLS); /media lo invalida si ve otro archivo
   const index = createSegmentIndex({ session: sessionDeps, ttlSec: config.infoJsonTtlSec, maxHeight: config.previewVideoMaxHeight });
-  const proxy = createPreviewProxy(app, { tuning, leases, session: sessionDeps, index });
+  const proxy = createPreviewProxy(app, { tuning, leases, session: sessionDeps, index, meta: metaCache });
 
   app.get(
     '/api/videos/:videoId/audio',
@@ -116,15 +119,26 @@ const previewRoute: FastifyPluginAsyncTypebox = async (app) => {
   );
 
   // Playlists HLS: mismas comprobaciones que /media (habilitado, apagado, origen, directo, duración)
-  async function loadVideo(req: FastifyRequest, videoId: string): Promise<{ meta: Meta; info: Record<string, unknown> }> {
+  // Con el mismo plazo que el proxy (504 UPSTREAM_TIMEOUT): un playlist en frío no se queda colgado si yt-dlp tarda
+  async function loadVideo(req: FastifyRequest, reply: FastifyReply, videoId: string): Promise<{ meta: Meta; info: Record<string, unknown> }> {
     if (!config.previewEnabled || !config.previewVideoEnabled) throw new AppError('SERVICE_UNAVAILABLE');
     if (app.lifecycle.draining) throw new AppError('SERVER_SHUTDOWN');
     proxy.checkOrigin(req);
-    const meta = await app.yt.metadata.get(videoId);
-    if (meta.live) throw new AppError('LIVE_NOT_SUPPORTED');
-    if (meta.duration > config.maxDurationAudioSec) throw new AppError('LIMIT_DURATION');
-    const info = (await infoCache.readInfoJson(videoId)) ?? (await infoCache.refresh(videoId)).infoJson;
-    return { meta, info };
+    const deadline = createDeadline(tuning.deadlineMs ?? 60_000);
+    const gone = new AbortController();
+    const onClose = () => gone.abort();
+    reply.raw.once('close', onClose);
+    try {
+      const meta = await withDeadline(metaCache.get(videoId), deadline, gone.signal);
+      if (meta.live) throw new AppError('LIVE_NOT_SUPPORTED');
+      if (meta.duration > config.maxDurationAudioSec) throw new AppError('LIMIT_DURATION');
+      const read = async () => (await infoCache.readInfoJson(videoId)) ?? (await infoCache.refresh(videoId)).infoJson;
+      const info = await withDeadline(read(), deadline, gone.signal);
+      return { meta, info };
+    } finally {
+      deadline.clear();
+      reply.raw.off('close', onClose);
+    }
   }
 
   const sendPlaylist = (reply: FastifyReply, body: string) =>
@@ -147,7 +161,7 @@ const previewRoute: FastifyPluginAsyncTypebox = async (app) => {
     { ...hlsRoute, schema: { params: VideoParams, querystring: HlsQuery, response: { '4xx': ErrorResponse, '5xx': ErrorResponse } } },
     async (req, reply) => {
       const { videoId } = req.params;
-      const { meta, info } = await loadVideo(req, videoId);
+      const { meta, info } = await loadVideo(req, reply, videoId);
       const plan = hlsPlan(info, meta.duration, config.previewVideoMaxHeight);
       if (!plan) throw new AppError('FORMAT_UNAVAILABLE');
       warm(videoId, plan.audio.formatId);
@@ -161,7 +175,7 @@ const previewRoute: FastifyPluginAsyncTypebox = async (app) => {
     { ...hlsRoute, schema: { params: MediaParams, querystring: HlsQuery, response: { '4xx': ErrorResponse, '5xx': ErrorResponse } } },
     async (req, reply) => {
       const { videoId, formatId } = req.params;
-      const { info } = await loadVideo(req, videoId);
+      const { info } = await loadVideo(req, reply, videoId);
       // Como en /media: un formato fuera de la lista permitida es un recurso que no existe → 404
       const unavailable = () => new AppError('FORMAT_UNAVAILABLE', { status: 404 });
       const src = previewSourceFor(info, formatId, config.previewVideoMaxHeight);

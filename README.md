@@ -129,7 +129,7 @@ GET /api/videos/:videoId/media/:formatId?sid=<32 hex>     → bytes del formato 
   - La primera variante es la de arranque: 720p o la más cercana por debajo (si no hay ninguna, la más baja). Después van el resto de menor a mayor.
   - `AVERAGE-BANDWIDTH` es el tamaño del archivo entre la duración (o el `tbr` de yt-dlp si falta el tamaño), más el audio. `BANDWIDTH` es 1,5 veces la media: el master no espera a los índices para no retrasar el arranque.
   - Al responder, el master calcula en segundo plano los índices del audio y de la variante de arranque, así los dos playlists que el reproductor pide a continuación salen de memoria.
-- **Media playlist.** `#EXT-X-PLAYLIST-TYPE:VOD`, `#EXT-X-TARGETDURATION`, `#EXT-X-MAP` con el init (`ftyp` + `moov`) por `BYTERANGE`, segmentos de ~6 s (fragmentos consecutivos del `sidx` agrupados, sin pasar de 9 s salvo que un fragmento ya sea más largo) y `#EXT-X-ENDLIST`. Un segmento solo empieza en un fragmento que arranca en un keyframe. Si la info actual dice que el archivo cambió de tamaño, el índice se vuelve a calcular antes de responder.
+- **Media playlist.** `#EXT-X-PLAYLIST-TYPE:VOD`, `#EXT-X-TARGETDURATION`, `#EXT-X-MAP` con el init (`ftyp` + `moov`) por `BYTERANGE`, segmentos de ~4 s (fragmentos consecutivos del `sidx` agrupados, sin pasar de 6 s salvo que un fragmento ya sea más largo; los de YouTube, de ~5 s, van uno por segmento) y `#EXT-X-ENDLIST`. Un segmento solo empieza en un fragmento que arranca en un keyframe. Si la info actual dice que el archivo cambió de tamaño, el índice se vuelve a calcular antes de responder.
 - **URIs relativas** y con el mismo `sid` en todas: el master apunta a `<formatId>.m3u8?sid=…` y los segmentos a `../media/<formatId>?sid=…`.
 - **`/media/:formatId`** es el mismo proxy que `/audio` (tramos de 10 MiB, reintentos ante 403/410, `ETag`/`If-Range`, backpressure). Solo sirve los formatos del master: un `formatId` fuera de esa lista responde 404 `FORMAT_UNAVAILABLE`, y uno con forma inválida, 400 `INVALID_INPUT`.
 - **Cabeceras.** Los playlists salen con `Content-Type: application/vnd.apple.mpegurl` y `Cache-Control: private, max-age=600`; los errores, con `no-store`. CORS expone `Content-Range`, `Accept-Ranges` y `Content-Length`.
@@ -142,7 +142,9 @@ GET /api/videos/:videoId/media/:formatId?sid=<32 hex>     → bytes del formato 
   - `PREVIEW_VIDEO_ENABLED=false` (o `PREVIEW_ENABLED=false`): 503 `SERVICE_UNAVAILABLE` en las tres rutas y `/api/config` responde `previewVideo: false`. La escucha sigue funcionando.
 - **Rate limit.** `PREVIEW_SEGMENT_RATE_LIMIT_MAX` peticiones por minuto e IP, con un contador para cada ruta (master, playlists y segmentos), sin gastar el de `/audio` ni el global.
 
-Cada segmento deja su línea `preview_finished` con `kind: "media"`.
+- **Coste por segmento.** Cada segmento es una petición, así que no vuelve a leer nada pesado: la meta del video (directo, duración) y el info JSON salen de memoria (15 s y 60 s), y a googlevideo se abre una sola conexión por segmento. Si la info no trae el tamaño del archivo, se usa el del índice en vez de hacer una sonda `bytes=0-0`. Los playlists tienen el mismo plazo que el proxy (60 s, `UPSTREAM_TIMEOUT` 504).
+
+Cada segmento deja su línea `preview_finished` con `kind: "media"`. `ttfbMs` es lo que tardó el servidor desde que llegó la petición hasta enviar las cabeceras (rate limit, meta, sesión y apertura de googlevideo); `ms`, la petición entera, que depende sobre todo de la red del navegador.
 
 ## Bloqueo de YouTube: PO token, proxy y cookies
 
