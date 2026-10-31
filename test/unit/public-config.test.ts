@@ -38,7 +38,8 @@ describe('preview en /api/config y en VideoResponse', () => {
       await app.close();
       app = null;
     }
-  });
+    // Cuatro arranques de la app en un test: con la máquina cargada pasa de los 5 s por defecto.
+  }, 20_000);
 
   it('audio.preview refleja los formatos https disponibles', () => {
     const onlyM4a = toPublicVideo(fakeMeta({ audio: { m4a: { formatId: '140', abr: 128, bytes: 1 } } }), limits);
