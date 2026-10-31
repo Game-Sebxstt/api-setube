@@ -214,6 +214,24 @@ describe('variables de escucha en streaming', () => {
     expect(keysOf(() => loadConfig(base(extra)))).toContain(key);
   });
 
+  it('video en streaming: defaults y valores válidos', () => {
+    expect(loadConfig(base())).toMatchObject({ previewVideoEnabled: true, previewVideoMaxHeight: 1080, previewSegmentRateLimitMax: 600 });
+    const c = loadConfig(base({ PREVIEW_VIDEO_ENABLED: 'false', PREVIEW_VIDEO_MAX_HEIGHT: '144', PREVIEW_SEGMENT_RATE_LIMIT_MAX: '1' }));
+    expect(c).toMatchObject({ previewVideoEnabled: false, previewVideoMaxHeight: 144, previewSegmentRateLimitMax: 1 });
+    expect(loadConfig(base({ PREVIEW_VIDEO_MAX_HEIGHT: '720' })).previewVideoMaxHeight).toBe(720);
+  });
+
+  it.each([
+    ['PREVIEW_VIDEO_MAX_HEIGHT', { PREVIEW_VIDEO_MAX_HEIGHT: '143' }],
+    ['PREVIEW_VIDEO_MAX_HEIGHT', { PREVIEW_VIDEO_MAX_HEIGHT: '1081' }],
+    ['PREVIEW_VIDEO_MAX_HEIGHT', { PREVIEW_VIDEO_MAX_HEIGHT: '2160' }],
+    ['PREVIEW_VIDEO_MAX_HEIGHT', { PREVIEW_VIDEO_MAX_HEIGHT: 'alto' }],
+    ['PREVIEW_SEGMENT_RATE_LIMIT_MAX', { PREVIEW_SEGMENT_RATE_LIMIT_MAX: '0' }],
+    ['PREVIEW_VIDEO_ENABLED', { PREVIEW_VIDEO_ENABLED: 'quizá' }],
+  ])('video en streaming inválido: %s', (key, extra) => {
+    expect(keysOf(() => loadConfig(base(extra)))).toContain(key);
+  });
+
   it('.env.example declara exactamente las variables del esquema', () => {
     const text = fs.readFileSync(new URL('../../.env.example', import.meta.url), 'utf8');
     const keys = text.split(/\r?\n/).flatMap((l) => /^([A-Z0-9_]+)=/.exec(l)?.[1] ?? []);

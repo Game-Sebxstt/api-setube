@@ -18,7 +18,8 @@ export default fp(
       origin: config.corsOrigins,
       methods: ['GET', 'POST', 'DELETE'],
       allowedHeaders: ['content-type', 'last-event-id', 'range'],
-      exposedHeaders: ['x-request-id', 'retry-after'],
+      // content-range/accept-ranges/content-length: hls.js y fetch leen los rangos de /media y /audio
+      exposedHeaders: ['x-request-id', 'retry-after', 'content-range', 'accept-ranges', 'content-length'],
       credentials: false,
       maxAge: 600,
     });

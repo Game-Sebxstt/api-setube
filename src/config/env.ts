@@ -68,6 +68,9 @@ export const EnvSchema = Type.Object({
   PREVIEW_RATE_LIMIT_MAX: Int(60, 1),
   PREVIEW_CHUNK_BYTES: Int(10485760, 1),
   PREVIEW_IDLE_TIMEOUT_MS: Int(60000, 1),
+  PREVIEW_VIDEO_ENABLED: Bool(true),
+  PREVIEW_VIDEO_MAX_HEIGHT: Int(1080, 144),
+  PREVIEW_SEGMENT_RATE_LIMIT_MAX: Int(600, 1),
   SEARCH_ENABLED: Bool(true),
   SEARCH_MAX_RESULTS: Int(12, 1),
   SEARCH_TTL_SEC: Int(3600, 1),
@@ -138,6 +141,9 @@ export interface Config {
   previewRateLimitMax: number;
   previewChunkBytes: number;
   previewIdleTimeoutMs: number;
+  previewVideoEnabled: boolean;
+  previewVideoMaxHeight: number;
+  previewSegmentRateLimitMax: number;
   searchEnabled: boolean;
   searchMaxResults: number;
   searchTtlSec: number;
@@ -256,6 +262,8 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env, log?: Cookie
   if (corsOrigins.length === 0) bad.push('CORS_ORIGINS');
   if (env.PREVIEW_CHUNK_BYTES < 1048576 || env.PREVIEW_CHUNK_BYTES > 10485760) bad.push('PREVIEW_CHUNK_BYTES');
   if (env.PREVIEW_IDLE_TIMEOUT_MS < 5000) bad.push('PREVIEW_IDLE_TIMEOUT_MS');
+  // Solo avc1 + AAC: por encima de 1080p YouTube sirve VP9/AV1
+  if (env.PREVIEW_VIDEO_MAX_HEIGHT > 1080) bad.push('PREVIEW_VIDEO_MAX_HEIGHT');
   if (env.SEARCH_MAX_RESULTS > 20) bad.push('SEARCH_MAX_RESULTS');
   const clientIpHeader = env.CLIENT_IP_HEADER.trim().toLowerCase();
   if (clientIpHeader !== '' && !/^[a-z0-9-]{1,64}$/.test(clientIpHeader)) bad.push('CLIENT_IP_HEADER');
@@ -335,6 +343,9 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env, log?: Cookie
     previewRateLimitMax: env.PREVIEW_RATE_LIMIT_MAX,
     previewChunkBytes: env.PREVIEW_CHUNK_BYTES,
     previewIdleTimeoutMs: env.PREVIEW_IDLE_TIMEOUT_MS,
+    previewVideoEnabled: env.PREVIEW_VIDEO_ENABLED,
+    previewVideoMaxHeight: env.PREVIEW_VIDEO_MAX_HEIGHT,
+    previewSegmentRateLimitMax: env.PREVIEW_SEGMENT_RATE_LIMIT_MAX,
     searchEnabled: env.SEARCH_ENABLED,
     searchMaxResults: env.SEARCH_MAX_RESULTS,
     searchTtlSec: env.SEARCH_TTL_SEC,

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { AppError } from '../../src/lib/errors.js';
-import { createPreviewLeases, pvIpsKey } from '../../src/lib/preview/leases.js';
+import { createPreviewLeases, MAX_MEDIA_CONNS_PER_PLAYER, pvIpsKey } from '../../src/lib/preview/leases.js';
 import type { PreviewConn } from '../../src/lib/preview/types.js';
 import { createTestRedis, type TestRedis } from './helpers/redis.js';
 
@@ -41,6 +41,36 @@ describe('leases de escucha con los Lua reales', () => {
     expect(await t.redis.zcard(pvIpsKey(h))).toBe(1);
     await Promise.all([l1.release(), l2.release(), l3.release()]);
     expect(await t.redis.zcard(pvIpsKey(h))).toBe(0);
+  });
+
+  it('medios: 6 conexiones del mismo sid ocupan un hueco; la 7.ª corta la más antigua y el ZSET queda vacío al soltar', async () => {
+    const h = `ip-${randomUUID()}`;
+    const s = sid();
+    const leases = createPreviewLeases(t.redis, { maxPerIp: 1, warn: () => undefined });
+    const cs = Array.from({ length: 7 }, conn);
+    const got = [];
+    for (const c of cs) got.push(await leases.acquire(h, s, c, MAX_MEDIA_CONNS_PER_PLAYER));
+    expect(await t.redis.zcard(pvIpsKey(h))).toBe(1);
+    expect(cs.map((c) => c.outcome)).toEqual(['superseded', null, null, null, null, null, null]);
+    // Otro reproductor de la misma IP no cabe (maxPerIp 1)
+    expect(code(await leases.acquire(h, sid(), conn(), MAX_MEDIA_CONNS_PER_PLAYER).catch((e) => e))).toBe('TOO_MANY_PREVIEWS');
+    for (const l of got) await l.release();
+    expect(await t.redis.zcard(pvIpsKey(h))).toBe(0);
+  });
+
+  it('gracia de video más larga que el lease: la renovación mantiene el miembro y se suelta al vencer', async () => {
+    const h = `ip-${randomUUID()}`;
+    const leases = createPreviewLeases(t.redis, { maxPerIp: 1, leaseMs: 300, renewMs: 100, warn: () => undefined });
+    const l = await leases.acquire(h, sid(), conn(), MAX_MEDIA_CONNS_PER_PLAYER, 900);
+    await l.release();
+    const t0 = Date.now();
+    while (Date.now() - t0 < 700) {
+      expect(await t.redis.zcard(pvIpsKey(h))).toBe(1);
+      await sleep(100);
+    }
+    await sleep(400);
+    expect(await t.redis.zcard(pvIpsKey(h))).toBe(0);
+    expect(leases.size()).toBe(0);
   });
 
   it('la renovación mantiene vivo el miembro más allá del lease', async () => {

@@ -23,6 +23,23 @@ describe('preview en /api/config y en VideoResponse', () => {
     expect((await app.inject({ method: 'GET', url: '/api/config' })).json().preview).toBe(false);
   });
 
+  it('/api/config expone previewVideo = PREVIEW_ENABLED && PREVIEW_VIDEO_ENABLED', async () => {
+    const cases: [Record<string, string>, boolean, boolean][] = [
+      [{}, true, true],
+      [{ PREVIEW_VIDEO_ENABLED: 'false' }, true, false],
+      [{ PREVIEW_ENABLED: 'false' }, false, false],
+      [{ PREVIEW_ENABLED: 'false', PREVIEW_VIDEO_ENABLED: 'true' }, false, false],
+    ];
+    for (const [env, preview, previewVideo] of cases) {
+      app = await buildFakeApp({}, {}, env);
+      const res = await app.inject({ method: 'GET', url: '/api/config' });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toMatchObject({ preview, previewVideo });
+      await app.close();
+      app = null;
+    }
+  });
+
   it('audio.preview refleja los formatos https disponibles', () => {
     const onlyM4a = toPublicVideo(fakeMeta({ audio: { m4a: { formatId: '140', abr: 128, bytes: 1 } } }), limits);
     expect(onlyM4a.audio.preview).toEqual({ aac: true, opus: false });
